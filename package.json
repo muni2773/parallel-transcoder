@@ -1,0 +1,28 @@
+{
+  "name": "parallel-video-transcoder",
+  "version": "1.0.0",
+  "description": "Massively parallel video transcoding with look-ahead optimization",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "video",
+    "transcoding",
+    "ffmpeg",
+    "parallel",
+    "encoding",
+    "mcp",
+    "mcpb"
+  ],
+  "author": "Muni Bajpai",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

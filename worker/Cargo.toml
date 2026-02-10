@@ -1,0 +1,25 @@
+[package]
+name = "transcoder-worker"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "transcoder-worker"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace dependencies
+ffmpeg-next.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Additional worker-specific dependencies
+image = "0.25"  # Image processing for complexity analysis

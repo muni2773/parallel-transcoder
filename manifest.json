@@ -1,0 +1,126 @@
+{
+  "manifest_version": "0.2",
+  "name": "parallel-video-transcoder",
+  "display_name": "Parallel Video Transcoder",
+  "version": "1.0.0",
+  "description": "Massively parallel video transcoding with look-ahead optimization for faster encoding",
+  "long_description": "# Parallel Video Transcoder\n\nA high-performance video transcoding MCPB bundle that leverages parallel processing and intelligent look-ahead optimization to dramatically reduce transcoding time.\n\n## Features\n\n- **4-8x faster** transcoding on multi-core systems\n- Intelligent keyframe-aligned segmentation\n- Scene change detection with look-ahead analysis\n- Complexity-based bitrate allocation\n- HLS output format support\n- Cross-platform (macOS, Windows, Linux)\n\n## How It Works\n\n1. Analyzes input video to identify keyframes and scene changes\n2. Splits video into segments at keyframe boundaries\n3. Processes segments in parallel across multiple workers\n4. Uses look-ahead analysis to optimize encoding decisions\n5. Reassembles segments into HLS playlist or MP4\n\n## Performance\n\nExpect 4-8x speedup compared to sequential FFmpeg transcoding, with minimal quality loss.",
+  "author": {
+    "name": "Muni Bajpai",
+    "email": "muni.bajpai@example.com"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/index.js"
+      ],
+      "env": {
+        "TRANSCODER_BIN": "${__dirname}/bin",
+        "FFMPEG_LIB_PATH": "${__dirname}/lib",
+        "NODE_ENV": "production"
+      },
+      "platform_overrides": {
+        "win32": {
+          "env": {
+            "PATH": "${__dirname}\\bin;${PATH}"
+          }
+        },
+        "darwin": {
+          "env": {
+            "DYLD_LIBRARY_PATH": "${__dirname}/lib:${DYLD_LIBRARY_PATH}"
+          }
+        },
+        "linux": {
+          "env": {
+            "LD_LIBRARY_PATH": "${__dirname}/lib:${LD_LIBRARY_PATH}"
+          }
+        }
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "transcode_video",
+      "description": "Transcode a video file using parallel processing with look-ahead optimization. Supports HLS and MP4 output formats."
+    },
+    {
+      "name": "analyze_video",
+      "description": "Analyze a video file and return detailed metadata including duration, resolution, keyframes, scene changes, and complexity estimates."
+    },
+    {
+      "name": "get_transcode_status",
+      "description": "Get the current status of an ongoing transcoding job, including progress percentage and estimated time remaining."
+    },
+    {
+      "name": "cancel_transcode",
+      "description": "Cancel a currently running transcoding job and clean up temporary files."
+    }
+  ],
+  "user_config": {
+    "output_directory": {
+      "type": "directory",
+      "title": "Output Directory",
+      "description": "Directory where transcoded videos will be saved",
+      "required": true,
+      "default": [
+        "${HOME}/Movies/Transcoded"
+      ]
+    },
+    "max_workers": {
+      "type": "number",
+      "title": "Maximum Worker Processes",
+      "description": "Number of parallel encoding workers. Set to 0 to automatically use CPU core count.",
+      "default": 0,
+      "min": 0,
+      "max": 64
+    },
+    "segment_duration": {
+      "type": "number",
+      "title": "Segment Duration (seconds)",
+      "description": "Target duration for each video segment. Actual duration will align to keyframe boundaries.",
+      "default": 10,
+      "min": 2,
+      "max": 60
+    },
+    "lookahead_frames": {
+      "type": "number",
+      "title": "Look-Ahead Frames",
+      "description": "Number of frames to analyze ahead for optimization. Higher values improve quality but increase memory usage.",
+      "default": 40,
+      "min": 0,
+      "max": 250
+    },
+    "enable_scene_detection": {
+      "type": "boolean",
+      "title": "Enable Scene Detection",
+      "description": "Automatically detect scene changes and insert keyframes for optimal quality.",
+      "default": true
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "claude_desktop": ">=0.10.0"
+  },
+  "keywords": [
+    "video",
+    "transcoding",
+    "ffmpeg",
+    "parallel",
+    "encoding",
+    "hls",
+    "performance"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/yourusername/parallel-transcoder",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/parallel-transcoder"
+  }
+}
