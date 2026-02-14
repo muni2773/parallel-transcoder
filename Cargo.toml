@@ -11,8 +11,8 @@ repository = "https://github.com/yourusername/parallel-transcoder"
 
 [workspace.dependencies]
 # FFmpeg bindings
-ffmpeg-next = "7.0"
-ffmpeg-sys-next = "7.0"
+ffmpeg-next = "8.0"
+ffmpeg-sys-next = "8.0"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
