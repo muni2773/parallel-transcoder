@@ -219,6 +219,13 @@ mod tests {
             scene_changes: vec![],
             complexity_map: vec![0.5; total_frames as usize],
             time_base: (1, 90000),
+            gop_stats: vec![],
+            profile: None,
+            level: None,
+            pix_fmt: None,
+            audio_tracks: vec![],
+            subtitle_tracks: vec![],
+            chapters: vec![],
         }
     }
 

@@ -1,4 +1,5 @@
 extern crate ffmpeg_next as ffmpeg;
+extern crate ffmpeg_sys_next as sys;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -10,12 +11,8 @@ use ffmpeg::software::scaling::{context::Context as ScalerContext, flag::Flags};
 use ffmpeg::util::frame::video::Video;
 use ffmpeg::{Dictionary, Rational};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use std::time::Instant;
-use tracing::{debug, info};
-
-mod lookahead;
-use lookahead::{analyze_frame, GrayFrame};
+use tracing::{debug, info, warn};
 
 #[derive(Parser, Debug)]
 #[command(name = "transcoder-worker")]
@@ -37,10 +34,6 @@ struct Args {
     #[arg(short, long)]
     worker_id: usize,
 
-    /// Look-ahead buffer size (number of frames)
-    #[arg(short, long, default_value = "40")]
-    lookahead: usize,
-
     /// Target video bitrate in kbps (0 = CRF mode)
     #[arg(short, long, default_value = "0")]
     bitrate: u32,
@@ -53,9 +46,21 @@ struct Args {
     #[arg(short, long, default_value = "medium")]
     preset: String,
 
+    /// Encoder to use (libx264 or h264_videotoolbox)
+    #[arg(short, long, default_value = "libx264")]
+    encoder: String,
+
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Pre-split mode: input file contains only this segment's data (skip seeking/filtering)
+    #[arg(long)]
+    presplit: bool,
+
+    /// Enable VideoToolbox hardware decoding (macOS only)
+    #[arg(long)]
+    hw_decode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +70,7 @@ pub struct SegmentDescriptor {
     pub end_frame: u64,
     pub start_timestamp: f64,
     pub end_timestamp: f64,
+    #[serde(default)]
     pub lookahead_frames: Option<usize>,
     pub complexity_estimate: f32,
     pub scene_changes: Vec<u64>,
@@ -106,10 +112,9 @@ fn main() -> Result<()> {
         segment.start_timestamp, segment.end_timestamp
     );
 
-    let lookahead_size = segment.lookahead_frames.unwrap_or(args.lookahead);
     let start_time = Instant::now();
 
-    let result = transcode_segment(&args, &segment, lookahead_size)?;
+    let frames_encoded = transcode_segment(&args, &segment)?;
 
     let encoding_time = start_time.elapsed().as_secs_f64();
     let output_size = std::fs::metadata(&args.output)
@@ -119,11 +124,11 @@ fn main() -> Result<()> {
     let worker_result = WorkerResult {
         segment_id: segment.id,
         worker_id: args.worker_id,
-        frames_encoded: result.frames_encoded,
+        frames_encoded,
         output_size_bytes: output_size,
         encoding_time_secs: encoding_time,
-        average_complexity: result.avg_complexity,
-        scene_changes_detected: result.scene_changes,
+        average_complexity: segment.complexity_estimate,
+        scene_changes_detected: 0,
         output_path: args.output.clone(),
     };
 
@@ -133,18 +138,12 @@ fn main() -> Result<()> {
     info!(
         "Worker {} complete: {} frames in {:.2}s ({:.1} fps)",
         args.worker_id,
-        result.frames_encoded,
+        frames_encoded,
         encoding_time,
-        result.frames_encoded as f64 / encoding_time
+        frames_encoded as f64 / encoding_time
     );
 
     Ok(())
-}
-
-struct TranscodeResult {
-    frames_encoded: u64,
-    avg_complexity: f32,
-    scene_changes: u64,
 }
 
 /// Encode a frame and write packets to output.
@@ -179,8 +178,10 @@ fn receive_and_write(
 fn transcode_segment(
     args: &Args,
     segment: &SegmentDescriptor,
-    lookahead_size: usize,
-) -> Result<TranscodeResult> {
+) -> Result<u64> {
+    let presplit = args.presplit;
+    let hw_decode = args.hw_decode;
+
     ffmpeg::init().context("Failed to initialize FFmpeg")?;
 
     // --- Open input ---
@@ -207,34 +208,73 @@ fn transcode_segment(
     let height = decoder.height();
     let src_format = decoder.format();
 
+    // --- Hardware decode setup (VideoToolbox) ---
+    let mut _hw_ctx: *mut sys::AVBufferRef = std::ptr::null_mut();
+    if hw_decode {
+        info!("Enabling VideoToolbox hardware decoding");
+        unsafe {
+            let ret = sys::av_hwdevice_ctx_create(
+                &mut _hw_ctx,
+                sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+            );
+            if ret < 0 {
+                warn!("Failed to create VideoToolbox device context (err={}), falling back to software decode", ret);
+            } else {
+                (*decoder.as_mut_ptr()).hw_device_ctx = sys::av_buffer_ref(_hw_ctx);
+                info!("VideoToolbox hardware decode enabled");
+            }
+        }
+    }
+
     info!("Input: {}x{} {:?}", width, height, src_format);
 
-    // --- Scalers ---
+    // --- Scaler ---
+    // Convert decoded frames to YUV420P for encoding.
+    // For hw decode, defer scaler init until we see the actual frame format.
     let enc_format = Pixel::YUV420P;
 
-    let mut gray_scaler = ScalerContext::get(
-        src_format, width, height,
-        Pixel::GRAY8, width, height,
-        Flags::BILINEAR,
-    )
-    .context("Failed to create grayscale scaler")?;
-
-    let mut yuv_scaler = ScalerContext::get(
-        src_format, width, height,
-        enc_format, width, height,
-        Flags::BILINEAR,
-    )
-    .context("Failed to create YUV420P scaler")?;
+    let mut yuv_scaler: Option<ScalerContext> = if !hw_decode {
+        Some(ScalerContext::get(
+            src_format, width, height,
+            enc_format, width, height,
+            Flags::BILINEAR,
+        ).context("Failed to create YUV420P scaler")?)
+    } else {
+        None
+    };
 
     // --- Set up encoder ---
-    let h264 = encoder::find(codec::Id::H264)
-        .ok_or_else(|| anyhow::anyhow!("H264 encoder not found — is libx264 available?"))?;
+    let use_videotoolbox = args.encoder == "h264_videotoolbox" || args.encoder == "videotoolbox";
+
+    let h264 = if use_videotoolbox {
+        encoder::find_by_name("h264_videotoolbox")
+            .ok_or_else(|| anyhow::anyhow!("h264_videotoolbox encoder not found — macOS only"))?
+    } else {
+        encoder::find_by_name("libx264")
+            .or_else(|| encoder::find(codec::Id::H264))
+            .ok_or_else(|| anyhow::anyhow!("H264 encoder not found — is libx264 available?"))?
+    };
 
     let mut octx = format::output(&args.output).context("Failed to create output file")?;
     let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
     let mut ost = octx.add_stream(h264).context("Failed to add output stream")?;
 
-    let enc_time_base = Rational::new(avg_frame_rate.denominator(), avg_frame_rate.numerator());
+    // Compute encoder time base from frame rate, with fallback for invalid rates
+    let enc_time_base = if avg_frame_rate.numerator() > 0 && avg_frame_rate.denominator() > 0 {
+        Rational::new(avg_frame_rate.denominator(), avg_frame_rate.numerator())
+    } else {
+        // Fallback: use 1/30 if frame rate is unknown, or derive from input time base
+        let r_frame_rate = unsafe { (*input_stream.as_ptr()).r_frame_rate };
+        if r_frame_rate.num > 0 && r_frame_rate.den > 0 {
+            Rational::new(r_frame_rate.den, r_frame_rate.num)
+        } else {
+            info!("Warning: could not determine frame rate, defaulting to 1/30");
+            Rational::new(1, 30)
+        }
+    };
 
     let enc_ctx = codec::context::Context::new_with_codec(h264);
     let mut video_enc = enc_ctx.encoder().video()?;
@@ -245,11 +285,31 @@ fn transcode_segment(
     video_enc.set_frame_rate(Some(avg_frame_rate));
 
     let mut opts = Dictionary::new();
-    opts.set("preset", &args.preset);
-    if args.bitrate > 0 {
-        video_enc.set_bit_rate(args.bitrate as usize * 1000);
+    if use_videotoolbox {
+        let target_bitrate = if args.bitrate > 0 {
+            args.bitrate as usize * 1000
+        } else {
+            let pixels = width as usize * height as usize;
+            if pixels >= 1920 * 1080 {
+                20_000_000
+            } else if pixels >= 1280 * 720 {
+                10_000_000
+            } else {
+                5_000_000
+            }
+        };
+        video_enc.set_bit_rate(target_bitrate);
+        opts.set("profile", "high");
+        opts.set("realtime", "false");
+        opts.set("allow_sw", "false");
+        info!("VideoToolbox encoder: bitrate={} bps", target_bitrate);
     } else {
-        opts.set("crf", &args.crf.to_string());
+        opts.set("preset", &args.preset);
+        if args.bitrate > 0 {
+            video_enc.set_bit_rate(args.bitrate as usize * 1000);
+        } else {
+            opts.set("crf", &args.crf.to_string());
+        }
     }
 
     if global_header {
@@ -258,12 +318,10 @@ fn transcode_segment(
 
     let mut opened_encoder = video_enc
         .open_as_with(h264, opts)
-        .context("Failed to open H264 encoder")?;
+        .context("Failed to open encoder")?;
     ost.set_parameters(&opened_encoder);
 
-    // Get the encoder's actual time_base and the output stream time_base
     let encoder_tb = opened_encoder.time_base();
-    let output_tb = ost.time_base();
 
     octx.write_header().context("Failed to write output header")?;
 
@@ -271,14 +329,14 @@ fn transcode_segment(
     let output_tb = octx.stream(0).unwrap().time_base();
 
     info!(
-        "Encoder ready: H264 preset={} crf={}, encoder_tb={}/{}, output_tb={}/{}",
-        args.preset, args.crf,
+        "Encoder ready: {} preset={} crf={}, encoder_tb={}/{}, output_tb={}/{}",
+        args.encoder, args.preset, args.crf,
         encoder_tb.numerator(), encoder_tb.denominator(),
         output_tb.numerator(), output_tb.denominator()
     );
 
     // --- Seek to segment start ---
-    if segment.start_timestamp > 0.1 {
+    if !presplit && segment.start_timestamp > 0.1 {
         let seek_target =
             (segment.start_timestamp * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
         ictx.seek(seek_target, ..seek_target)
@@ -287,17 +345,37 @@ fn transcode_segment(
         info!("Seeked to {:.2}s", segment.start_timestamp);
     }
 
-    // --- Decode all frames in segment ---
-    // First, decode and buffer all frames, then encode with look-ahead.
-    // This avoids complex interleaving and ensures the look-ahead buffer
-    // is always full. Memory is bounded by segment size.
-
-    let mut yuv_frames: Vec<Video> = Vec::new();
-    let mut gray_frames: Vec<GrayFrame> = Vec::new();
-    let mut reached_segment = segment.start_timestamp < 0.1;
-
+    // --- Decode and encode frames ---
+    // Stream decode → scale → encode without buffering.
+    // x264's built-in scenecut detection and rate control handle everything.
+    let mut frames_encoded: u64 = 0;
+    let mut reached_segment = presplit || segment.start_timestamp < 0.1;
     let mut decoded_frame = Video::empty();
-    let mut gray_frame = Video::empty();
+    let mut hw_transfer_frame = Video::empty();
+    let mut scaler_initialized = !hw_decode;
+    let mut enc_packet = ffmpeg::Packet::empty();
+
+    // Helper closure-like processing for each decoded frame
+    let mut process_frame = |frame_ref: &Video,
+                             yuv_scaler: &mut Option<ScalerContext>,
+                             opened_encoder: &mut ffmpeg::encoder::video::Video,
+                             enc_packet: &mut ffmpeg::Packet,
+                             octx: &mut format::context::Output,
+                             frames_encoded: &mut u64|
+     -> Result<()> {
+        let ys = yuv_scaler.as_mut().unwrap();
+        let mut yuv_frame = Video::empty();
+        ys.run(frame_ref, &mut yuv_frame)?;
+        yuv_frame.set_pts(Some(*frames_encoded as i64));
+
+        encode_and_write(opened_encoder, enc_packet, &yuv_frame, encoder_tb, output_tb, octx)?;
+        *frames_encoded += 1;
+
+        if *frames_encoded % 100 == 0 {
+            info!("Encoded {} frames...", *frames_encoded);
+        }
+        Ok(())
+    };
 
     for (stream, packet) in ictx.packets() {
         if stream.index() != video_stream_index {
@@ -307,119 +385,103 @@ fn transcode_segment(
         decoder.send_packet(&packet)?;
 
         while decoder.receive_frame(&mut decoded_frame).is_ok() {
-            let pts = decoded_frame.pts().unwrap_or(0);
-            let pts_secs = pts as f64 * input_time_base.numerator() as f64
-                / input_time_base.denominator() as f64;
-
-            if !reached_segment {
-                if pts_secs < segment.start_timestamp - 0.001 {
-                    continue;
+            // Handle hardware decode: transfer from GPU to CPU memory
+            let frame_ref = if hw_decode {
+                let frame_format = unsafe { (*decoded_frame.as_ptr()).format };
+                if frame_format == sys::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX as i32 {
+                    unsafe {
+                        let ret = sys::av_hwframe_transfer_data(
+                            hw_transfer_frame.as_mut_ptr(),
+                            decoded_frame.as_ptr(),
+                            0,
+                        );
+                        if ret < 0 {
+                            warn!("Failed to transfer hw frame (err={}), skipping", ret);
+                            continue;
+                        }
+                        (*hw_transfer_frame.as_mut_ptr()).pts = (*decoded_frame.as_ptr()).pts;
+                    }
+                    &hw_transfer_frame
+                } else {
+                    &decoded_frame
                 }
-                reached_segment = true;
-                debug!("Reached segment start at PTS {:.3}s", pts_secs);
+            } else {
+                &decoded_frame
+            };
+
+            // Lazy-init scaler after seeing actual decoded frame format
+            if !scaler_initialized {
+                let actual_format = frame_ref.format();
+                info!("HW decoded frame format: {:?}, initializing scaler", actual_format);
+                yuv_scaler = Some(ScalerContext::get(
+                    actual_format, width, height,
+                    enc_format, width, height,
+                    Flags::BILINEAR,
+                ).context("Failed to create YUV420P scaler for hw decode format")?);
+                scaler_initialized = true;
             }
 
-            if pts_secs > segment.end_timestamp + 0.001 {
-                break;
+            // In presplit mode, accept all frames without timestamp filtering
+            if !presplit {
+                let pts = frame_ref.pts().unwrap_or(0);
+                let pts_secs = pts as f64 * input_time_base.numerator() as f64
+                    / input_time_base.denominator() as f64;
+
+                if !reached_segment {
+                    if pts_secs < segment.start_timestamp - 0.001 {
+                        continue;
+                    }
+                    reached_segment = true;
+                    debug!("Reached segment start at PTS {:.3}s", pts_secs);
+                }
+
+                if pts_secs > segment.end_timestamp + 0.001 {
+                    break;
+                }
             }
 
-            // Convert to grayscale for analysis
-            gray_scaler.run(&decoded_frame, &mut gray_frame)?;
-            let gray_data = gray_frame.data(0);
-            let stride = gray_frame.stride(0) as usize;
-            let mut gray_vec = Vec::with_capacity(width as usize * height as usize);
-            for y in 0..height as usize {
-                gray_vec.extend_from_slice(&gray_data[y * stride..y * stride + width as usize]);
-            }
-            gray_frames.push(GrayFrame {
-                data: gray_vec,
-                width: width as usize,
-                height: height as usize,
-                frame_number: yuv_frames.len() as u64,
-            });
-
-            // Convert to YUV420P for encoding
-            let mut yuv_frame = Video::empty();
-            yuv_scaler.run(&decoded_frame, &mut yuv_frame)?;
-            yuv_frames.push(yuv_frame);
+            process_frame(
+                frame_ref, &mut yuv_scaler, &mut opened_encoder,
+                &mut enc_packet, &mut octx, &mut frames_encoded,
+            )?;
         }
     }
 
     // Flush decoder
     decoder.send_eof()?;
     while decoder.receive_frame(&mut decoded_frame).is_ok() {
-        if !reached_segment {
-            continue;
-        }
-        let pts = decoded_frame.pts().unwrap_or(0);
-        let pts_secs = pts as f64 * input_time_base.numerator() as f64
-            / input_time_base.denominator() as f64;
-        if pts_secs > segment.end_timestamp + 0.001 {
-            break;
-        }
+        let frame_ref = if hw_decode {
+            let frame_format = unsafe { (*decoded_frame.as_ptr()).format };
+            if frame_format == sys::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX as i32 {
+                unsafe {
+                    let ret = sys::av_hwframe_transfer_data(
+                        hw_transfer_frame.as_mut_ptr(),
+                        decoded_frame.as_ptr(),
+                        0,
+                    );
+                    if ret < 0 { continue; }
+                    (*hw_transfer_frame.as_mut_ptr()).pts = (*decoded_frame.as_ptr()).pts;
+                }
+                &hw_transfer_frame
+            } else {
+                &decoded_frame
+            }
+        } else {
+            &decoded_frame
+        };
 
-        gray_scaler.run(&decoded_frame, &mut gray_frame)?;
-        let gray_data = gray_frame.data(0);
-        let stride = gray_frame.stride(0) as usize;
-        let mut gray_vec = Vec::with_capacity(width as usize * height as usize);
-        for y in 0..height as usize {
-            gray_vec.extend_from_slice(&gray_data[y * stride..y * stride + width as usize]);
-        }
-        gray_frames.push(GrayFrame {
-            data: gray_vec,
-            width: width as usize,
-            height: height as usize,
-            frame_number: yuv_frames.len() as u64,
-        });
-
-        let mut yuv_frame = Video::empty();
-        yuv_scaler.run(&decoded_frame, &mut yuv_frame)?;
-        yuv_frames.push(yuv_frame);
-    }
-
-    info!("Decoded {} frames for encoding", yuv_frames.len());
-
-    // --- Encode with look-ahead ---
-    let total_frames = yuv_frames.len();
-    let mut frames_encoded: u64 = 0;
-    let mut complexity_sum: f32 = 0.0;
-    let mut scene_change_count: u64 = 0;
-    let mut enc_packet = ffmpeg::Packet::empty();
-
-    for i in 0..total_frames {
-        // Build look-ahead window for analysis
-        let end = (i + lookahead_size + 1).min(gray_frames.len());
-        let mut la_buf: VecDeque<GrayFrame> = gray_frames[i..end].iter().cloned().collect();
-
-        let analysis = analyze_frame(&la_buf);
-
-        if analysis.is_scene_change {
-            scene_change_count += 1;
-            debug!("Scene change at frame {} (complexity={:.3})", i, analysis.complexity);
-        }
-        complexity_sum += analysis.complexity;
-
-        let frame = &mut yuv_frames[i];
-        frame.set_pts(Some(i as i64));
-
-        if analysis.is_scene_change {
-            frame.set_kind(ffmpeg::picture::Type::I);
+        if !presplit {
+            if !reached_segment { continue; }
+            let pts = frame_ref.pts().unwrap_or(0);
+            let pts_secs = pts as f64 * input_time_base.numerator() as f64
+                / input_time_base.denominator() as f64;
+            if pts_secs > segment.end_timestamp + 0.001 { break; }
         }
 
-        encode_and_write(
-            &mut opened_encoder,
-            &mut enc_packet,
-            frame,
-            encoder_tb,
-            output_tb,
-            &mut octx,
+        process_frame(
+            frame_ref, &mut yuv_scaler, &mut opened_encoder,
+            &mut enc_packet, &mut octx, &mut frames_encoded,
         )?;
-
-        frames_encoded += 1;
-
-        if frames_encoded % 100 == 0 {
-            info!("Encoded {}/{} frames...", frames_encoded, total_frames);
-        }
     }
 
     // Flush encoder
@@ -435,22 +497,9 @@ fn transcode_segment(
     octx.write_trailer()
         .context("Failed to write output trailer")?;
 
-    let avg_complexity = if frames_encoded > 0 {
-        complexity_sum / frames_encoded as f32
-    } else {
-        0.0
-    };
+    info!("Encoded {} frames", frames_encoded);
 
-    info!(
-        "Encoded {} frames, avg complexity={:.3}, scene changes={}",
-        frames_encoded, avg_complexity, scene_change_count
-    );
-
-    Ok(TranscodeResult {
-        frames_encoded,
-        avg_complexity,
-        scene_changes: scene_change_count,
-    })
+    Ok(frames_encoded)
 }
 
 #[cfg(test)]

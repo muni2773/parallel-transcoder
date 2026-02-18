@@ -1,0 +1,2134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parallel Transcoder</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600;700&family=Barlow:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ═══════════════════════════════════════════════════════════════════
+   DESIGN TOKENS
+   ═══════════════════════════════════════════════════════════════════ */
+:root {
+  --bg-deep: #08080A;
+  --bg: #0E0E12;
+  --surface: #151519;
+  --surface-raised: #1C1C22;
+  --surface-overlay: #24242C;
+  --amber: #E8A838;
+  --amber-hover: #F0B848;
+  --amber-dim: #9A6E22;
+  --amber-glow: rgba(232, 168, 56, 0.12);
+  --amber-glow-strong: rgba(232, 168, 56, 0.25);
+  --teal: #3DDBD9;
+  --teal-dim: #2A9E9C;
+  --text: #D4D4DA;
+  --text-secondary: #8585A0;
+  --text-muted: #505068;
+  --border: #28283A;
+  --border-dim: #1E1E2A;
+  --success: #40C463;
+  --success-dim: rgba(64, 196, 99, 0.15);
+  --error: #E5534B;
+  --error-dim: rgba(229, 83, 75, 0.12);
+  --info: #4DA6FF;
+  --info-dim: rgba(77, 166, 255, 0.12);
+  --font-display: 'Chakra Petch', sans-serif;
+  --font-body: 'Barlow', sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+  --radius: 6px;
+  --radius-lg: 10px;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --panel-width: 380px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   RESET & BASE
+   ═══════════════════════════════════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  font-family: var(--font-body);
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scanline overlay */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 3px,
+    rgba(0, 0, 0, 0.018) 3px,
+    rgba(0, 0, 0, 0.018) 4px
+  );
+  z-index: 10000;
+}
+
+/* Noise grain texture */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.025;
+  z-index: 9999;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+}
+
+::selection {
+  background: var(--amber);
+  color: var(--bg-deep);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   LAYOUT
+   ═══════════════════════════════════════════════════════════════════ */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* ─── Header ─── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 28px;
+  height: 56px;
+  min-height: 56px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: relative;
+  z-index: 10;
+  animation: fadeSlideDown 0.5s var(--ease) both;
+}
+
+.header::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent,
+    var(--amber-dim) 20%,
+    var(--amber) 50%,
+    var(--amber-dim) 80%,
+    transparent
+  );
+  opacity: 0.4;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.header-logo {
+  height: 36px;
+  width: auto;
+  flex-shrink: 0;
+}
+
+.header-title {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.header-title span {
+  color: var(--amber);
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.ws-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.ws-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--error);
+  transition: background 0.3s var(--ease), box-shadow 0.3s var(--ease);
+}
+
+.ws-dot.connected {
+  background: var(--success);
+  box-shadow: 0 0 8px rgba(64, 196, 99, 0.5);
+}
+
+/* ─── Body (two columns) ─── */
+.body-wrap {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ─── Left Panel ─── */
+.left-panel {
+  width: var(--panel-width);
+  min-width: var(--panel-width);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--bg);
+  animation: fadeSlideRight 0.5s var(--ease) 0.1s both;
+}
+
+.left-panel::-webkit-scrollbar { width: 5px; }
+.left-panel::-webkit-scrollbar-track { background: transparent; }
+.left-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.panel-section {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border-dim);
+}
+
+.panel-section:last-child {
+  border-bottom: none;
+}
+
+.section-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-label::before {
+  content: '';
+  width: 3px;
+  height: 3px;
+  background: var(--amber);
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* ─── Right Panel ─── */
+.right-panel {
+  flex: 1;
+  overflow-y: auto;
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  animation: fadeSlideLeft 0.5s var(--ease) 0.2s both;
+}
+
+.right-panel::-webkit-scrollbar { width: 5px; }
+.right-panel::-webkit-scrollbar-track { background: transparent; }
+.right-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   UPLOAD ZONE
+   ═══════════════════════════════════════════════════════════════════ */
+.upload-zone {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.3s var(--ease), background 0.3s var(--ease), box-shadow 0.3s var(--ease);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+/* Corner brackets */
+.upload-zone::before,
+.upload-zone::after {
+  content: '';
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-color: var(--text-muted);
+  border-style: solid;
+  transition: border-color 0.3s var(--ease);
+  z-index: 1;
+}
+
+.upload-zone::before {
+  top: 6px;
+  left: 6px;
+  border-width: 2px 0 0 2px;
+}
+
+.upload-zone::after {
+  bottom: 6px;
+  right: 6px;
+  border-width: 0 2px 2px 0;
+}
+
+.upload-zone:hover {
+  border-color: var(--amber-dim);
+  background: var(--surface-raised);
+}
+
+.upload-zone:hover::before,
+.upload-zone:hover::after {
+  border-color: var(--amber);
+}
+
+.upload-zone.drag-over {
+  border-color: var(--amber);
+  background: var(--amber-glow);
+  box-shadow: inset 0 0 30px var(--amber-glow), 0 0 20px var(--amber-glow);
+}
+
+.upload-zone.drag-over::before,
+.upload-zone.drag-over::after {
+  border-color: var(--amber);
+}
+
+.upload-zone.has-file {
+  border-color: var(--success);
+  background: var(--success-dim);
+}
+
+.upload-zone.has-file::before,
+.upload-zone.has-file::after {
+  border-color: var(--success);
+}
+
+.upload-zone input[type="file"] {
+  display: none;
+}
+
+.upload-target {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 12px;
+  position: relative;
+}
+
+/* Crosshair icon via CSS */
+.upload-target::before,
+.upload-target::after {
+  content: '';
+  position: absolute;
+  background: var(--text-muted);
+  transition: background 0.3s var(--ease);
+}
+
+.upload-target::before {
+  top: 50%;
+  left: 8px;
+  right: 8px;
+  height: 1px;
+  transform: translateY(-0.5px);
+}
+
+.upload-target::after {
+  left: 50%;
+  top: 8px;
+  bottom: 8px;
+  width: 1px;
+  transform: translateX(-0.5px);
+}
+
+.upload-target-ring {
+  position: absolute;
+  inset: 0;
+  border: 1.5px solid var(--text-muted);
+  border-radius: 50%;
+  transition: border-color 0.3s var(--ease);
+}
+
+.upload-zone:hover .upload-target::before,
+.upload-zone:hover .upload-target::after { background: var(--amber); }
+.upload-zone:hover .upload-target-ring { border-color: var(--amber); }
+
+.upload-zone.drag-over .upload-target::before,
+.upload-zone.drag-over .upload-target::after { background: var(--amber); }
+.upload-zone.drag-over .upload-target-ring { border-color: var(--amber); }
+
+.upload-label {
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+
+.upload-label strong {
+  color: var(--text);
+}
+
+.upload-btn-inline {
+  display: inline-block;
+  padding: 6px 18px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  background: transparent;
+  color: var(--amber);
+  border: 1px solid var(--amber-dim);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.2s var(--ease);
+}
+
+.upload-btn-inline:hover {
+  background: var(--amber);
+  color: var(--bg-deep);
+  border-color: var(--amber);
+}
+
+.file-info {
+  margin-top: 14px;
+  padding: 10px 14px;
+  background: var(--surface-raised);
+  border-radius: 4px;
+  border-left: 3px solid var(--success);
+  text-align: left;
+}
+
+.file-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.file-size {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+
+/* Upload progress */
+.upload-progress {
+  margin-top: 14px;
+  display: none;
+}
+
+.upload-progress.active {
+  display: block;
+}
+
+.progress-track {
+  width: 100%;
+  height: 4px;
+  background: var(--surface-overlay);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--amber-dim), var(--amber));
+  border-radius: 2px;
+  width: 0%;
+  transition: width 0.3s var(--ease);
+}
+
+.progress-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  text-align: right;
+  letter-spacing: 0.5px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   CONFIGURATION FORM
+   ═══════════════════════════════════════════════════════════════════ */
+.config-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.config-grid .full-width {
+  grid-column: 1 / -1;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.field-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+}
+
+.field select,
+.field input[type="number"] {
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 13px;
+  font-family: var(--font-body);
+  font-weight: 500;
+  background: var(--surface-raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  outline: none;
+  transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.field select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23505068'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+}
+
+.field select:focus,
+.field input[type="number"]:focus {
+  border-color: var(--amber-dim);
+  box-shadow: 0 0 0 2px var(--amber-glow);
+}
+
+.field select option {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+/* Range slider */
+.range-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.range-row input[type="range"] {
+  flex: 1;
+  height: 4px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--surface-overlay);
+  border-radius: 2px;
+  outline: none;
+}
+
+.range-row input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--amber);
+  cursor: pointer;
+  border: 2px solid var(--bg-deep);
+  box-shadow: 0 0 6px var(--amber-glow);
+}
+
+.range-row input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--amber);
+  cursor: pointer;
+  border: 2px solid var(--bg-deep);
+}
+
+.range-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--amber);
+  min-width: 36px;
+  text-align: right;
+}
+
+/* Checkbox */
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.check-row input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface-raised);
+  cursor: pointer;
+  position: relative;
+  transition: all 0.2s var(--ease);
+  flex-shrink: 0;
+}
+
+.check-row input[type="checkbox"]:checked {
+  background: var(--amber);
+  border-color: var(--amber);
+}
+
+.check-row input[type="checkbox"]:checked::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 5px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--bg-deep);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.check-row span {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.field.hidden {
+  display: none;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   ACTION BUTTONS
+   ═══════════════════════════════════════════════════════════════════ */
+.actions {
+  display: flex;
+  gap: 10px;
+}
+
+.btn {
+  flex: 1;
+  padding: 11px 16px;
+  font-size: 12px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s var(--ease);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  position: relative;
+  overflow: hidden;
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.btn-analyze {
+  background: var(--surface-raised);
+  color: var(--teal);
+  border: 1px solid var(--teal-dim);
+}
+
+.btn-analyze:hover:not(:disabled) {
+  background: rgba(61, 219, 217, 0.1);
+  box-shadow: 0 0 16px rgba(61, 219, 217, 0.1);
+}
+
+.btn-transcode {
+  background: linear-gradient(135deg, var(--amber), var(--amber-dim));
+  color: var(--bg-deep);
+  box-shadow: 0 2px 12px var(--amber-glow);
+}
+
+.btn-transcode:hover:not(:disabled) {
+  background: linear-gradient(135deg, var(--amber-hover), var(--amber));
+  box-shadow: 0 4px 20px var(--amber-glow-strong);
+}
+
+.btn .spinner {
+  display: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid transparent;
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+.btn.loading .spinner { display: inline-block; }
+.btn.loading .btn-text { opacity: 0.7; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.btn-cancel {
+  padding: 5px 12px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  background: transparent;
+  color: var(--error);
+  border: 1px solid rgba(229, 83, 75, 0.3);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.2s var(--ease);
+}
+
+.btn-cancel:hover {
+  background: var(--error-dim);
+  border-color: var(--error);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   EMPTY STATE
+   ═══════════════════════════════════════════════════════════════════ */
+.empty-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 400px;
+}
+
+.empty-graphic {
+  width: 80px;
+  height: 80px;
+  position: relative;
+  opacity: 0.2;
+}
+
+.empty-graphic::before,
+.empty-graphic::after {
+  content: '';
+  position: absolute;
+  background: var(--text-muted);
+}
+
+.empty-graphic::before {
+  top: 50%;
+  left: 12px;
+  right: 12px;
+  height: 1px;
+}
+
+.empty-graphic::after {
+  left: 50%;
+  top: 12px;
+  bottom: 12px;
+  width: 1px;
+}
+
+.empty-ring {
+  position: absolute;
+  inset: 0;
+  border: 1.5px solid var(--text-muted);
+  border-radius: 50%;
+}
+
+.empty-text {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   ANALYSIS VIEW
+   ═══════════════════════════════════════════════════════════════════ */
+.analysis-view {
+  display: none;
+}
+
+.analysis-view.visible {
+  display: block;
+}
+
+.analysis-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  position: relative;
+}
+
+/* Corner brackets on analysis card */
+.analysis-card::before,
+.analysis-card::after {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-color: var(--teal-dim);
+  border-style: solid;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.analysis-card::before {
+  top: 4px;
+  left: 4px;
+  border-width: 2px 0 0 2px;
+}
+
+.analysis-card::after {
+  bottom: 4px;
+  right: 4px;
+  border-width: 0 2px 2px 0;
+}
+
+.analysis-header {
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.analysis-header h2 {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--teal);
+}
+
+.analysis-summary {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.analysis-body {
+  padding: 0;
+}
+
+.global-blockers {
+  padding: 12px 24px;
+  background: var(--error-dim);
+  border-bottom: 1px solid rgba(229, 83, 75, 0.15);
+}
+
+.blocker-item {
+  color: var(--error);
+  font-size: 13px;
+  padding: 2px 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.blocker-item::before {
+  content: "\25B6 ";
+  font-size: 8px;
+  vertical-align: middle;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   BADGES
+   ═══════════════════════════════════════════════════════════════════ */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.badge-copy       { background: var(--success-dim); color: var(--success); border-color: rgba(64, 196, 99, 0.2); }
+.badge-encode     { background: var(--amber-glow); color: var(--amber); border-color: rgba(232, 168, 56, 0.2); }
+.badge-analyzing  { background: var(--amber-glow); color: var(--amber); border-color: rgba(232, 168, 56, 0.2); }
+.badge-splitting  { background: var(--info-dim); color: var(--info); border-color: rgba(77, 166, 255, 0.2); }
+.badge-encoding   { background: rgba(180, 120, 230, 0.12); color: #B478E6; border-color: rgba(180, 120, 230, 0.2); }
+.badge-finalizing { background: rgba(61, 219, 217, 0.1); color: var(--teal); border-color: rgba(61, 219, 217, 0.2); }
+.badge-complete   { background: var(--success-dim); color: var(--success); border-color: rgba(64, 196, 99, 0.2); }
+.badge-error      { background: var(--error-dim); color: var(--error); border-color: rgba(229, 83, 75, 0.2); }
+.badge-cancelled  { background: rgba(80, 80, 104, 0.15); color: var(--text-muted); border-color: rgba(80, 80, 104, 0.2); }
+.badge-total      { background: rgba(255,255,255,0.04); color: var(--text-secondary); border-color: var(--border); }
+
+/* ═══════════════════════════════════════════════════════════════════
+   SEGMENTS TABLE
+   ═══════════════════════════════════════════════════════════════════ */
+.segments-table-wrap {
+  overflow-x: auto;
+}
+
+.segments-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.segments-table th {
+  text-align: left;
+  padding: 10px 20px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  background: var(--surface-raised);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+}
+
+.segments-table td {
+  padding: 9px 20px;
+  border-bottom: 1px solid var(--border-dim);
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.segments-table tr:last-child td {
+  border-bottom: none;
+}
+
+.segments-table tr:hover td {
+  background: rgba(232, 168, 56, 0.02);
+}
+
+.segments-table .reasons-cell {
+  white-space: normal;
+  max-width: 300px;
+  font-family: var(--font-body);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   JOBS SECTION
+   ═══════════════════════════════════════════════════════════════════ */
+.jobs-section {
+  display: none;
+}
+
+.jobs-section.visible {
+  display: block;
+}
+
+.jobs-heading {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.jobs-heading::before {
+  content: '';
+  width: 4px;
+  height: 4px;
+  background: var(--amber);
+  border-radius: 50%;
+}
+
+.jobs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   JOB CARD
+   ═══════════════════════════════════════════════════════════════════ */
+.job-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  transition: border-color 0.3s var(--ease), box-shadow 0.3s var(--ease);
+  position: relative;
+  animation: fadeSlideUp 0.4s var(--ease) both;
+}
+
+.job-card:hover {
+  border-color: rgba(232, 168, 56, 0.15);
+}
+
+/* Subtle left accent line */
+.job-card::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--amber-dim);
+  opacity: 0.5;
+  transition: opacity 0.3s var(--ease);
+}
+
+.job-card:hover::before {
+  opacity: 1;
+}
+
+.job-card.phase-complete::before { background: var(--success); }
+.job-card.phase-error::before { background: var(--error); }
+
+.job-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border-dim);
+}
+
+.job-id {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--amber);
+  letter-spacing: 0.5px;
+}
+
+.job-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.job-card-body {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   VU-METER PROGRESS
+   ═══════════════════════════════════════════════════════════════════ */
+.vu-meter-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vu-meter-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.vu-phase {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  letter-spacing: 0.3px;
+}
+
+.vu-percent {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--amber);
+  letter-spacing: 0.5px;
+}
+
+.vu-meter {
+  display: flex;
+  gap: 2px;
+  height: 14px;
+}
+
+.vu-seg {
+  flex: 1;
+  border-radius: 1px;
+  background: var(--surface-overlay);
+  transition: background 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  min-width: 2px;
+}
+
+/* Lit segments by color zone */
+.vu-seg.lit-green {
+  background: #40C463;
+  box-shadow: 0 0 4px rgba(64, 196, 99, 0.3);
+}
+
+.vu-seg.lit-amber {
+  background: var(--amber);
+  box-shadow: 0 0 4px var(--amber-glow);
+}
+
+.vu-seg.lit-red {
+  background: var(--error);
+  box-shadow: 0 0 4px rgba(229, 83, 75, 0.3);
+}
+
+/* Fallback: simple bar progress for when VU isn't initialized */
+.simple-bar {
+  width: 100%;
+  height: 4px;
+  background: var(--surface-overlay);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.simple-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  width: 0%;
+  transition: width 0.4s var(--ease), background 0.3s var(--ease);
+  background: linear-gradient(90deg, var(--amber-dim), var(--amber));
+}
+
+.simple-bar-fill.complete {
+  background: var(--success);
+}
+
+.simple-bar-fill.error {
+  background: var(--error);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   SEGMENT STATUS STRIP
+   ═══════════════════════════════════════════════════════════════════ */
+.segment-strip {
+  display: flex;
+  gap: 2px;
+  height: 10px;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.segment-strip:empty {
+  display: none;
+}
+
+.seg-block {
+  flex: 1;
+  border-radius: 1px;
+  background: var(--surface-overlay);
+  transition: background 0.3s var(--ease);
+  min-width: 3px;
+}
+
+.seg-block.pending   { background: #1E1E2A; }
+.seg-block.encoding  { background: var(--info); animation: pulse-led 1.4s ease-in-out infinite; }
+.seg-block.done      { background: var(--success); }
+.seg-block.copied    { background: var(--teal); }
+.seg-block.complete  { background: var(--success); }
+
+@keyframes pulse-led {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   LOG TAIL
+   ═══════════════════════════════════════════════════════════════════ */
+.log-tail {
+  max-height: 140px;
+  overflow-y: auto;
+  background: var(--bg-deep);
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-muted);
+  border: 1px solid var(--border-dim);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.log-tail::-webkit-scrollbar { width: 4px; }
+.log-tail::-webkit-scrollbar-track { background: transparent; }
+.log-tail::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.log-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-line::before {
+  content: "\25B8 ";
+  color: var(--amber-dim);
+  font-size: 9px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   DOWNLOAD LINKS
+   ═══════════════════════════════════════════════════════════════════ */
+.download-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.download-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  background: var(--success-dim);
+  color: var(--success);
+  border: 1px solid rgba(64, 196, 99, 0.2);
+  border-radius: 3px;
+  text-decoration: none;
+  transition: all 0.2s var(--ease);
+}
+
+.download-link:hover {
+  background: rgba(64, 196, 99, 0.2);
+  border-color: var(--success);
+  box-shadow: 0 0 12px rgba(64, 196, 99, 0.1);
+}
+
+.download-link::before {
+  content: "\2193";
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   ANIMATIONS
+   ═══════════════════════════════════════════════════════════════════ */
+@keyframes fadeSlideDown {
+  from { opacity: 0; transform: translateY(-12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeSlideRight {
+  from { opacity: 0; transform: translateX(-16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes fadeSlideLeft {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   RESPONSIVE
+   ═══════════════════════════════════════════════════════════════════ */
+@media (max-width: 840px) {
+  :root {
+    --panel-width: 100%;
+  }
+
+  .body-wrap {
+    flex-direction: column;
+  }
+
+  .left-panel {
+    width: 100%;
+    min-width: unset;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    overflow-y: visible;
+    max-height: none;
+  }
+
+  .right-panel {
+    padding: 20px 16px;
+  }
+
+  .header {
+    padding: 0 16px;
+  }
+
+  .config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .analysis-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ═══ HEADER ═══ -->
+  <header class="header">
+    <div class="header-left">
+      <img src="logo.svg" alt="Logo" class="header-logo">
+      <div class="header-title"><span>Parallel</span> Transcoder</div>
+    </div>
+    <div class="header-right">
+      <div class="ws-indicator">
+        <span class="ws-dot" id="wsDot"></span>
+        <span id="wsLabel">Offline</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="body-wrap">
+
+    <!-- ═══ LEFT PANEL ═══ -->
+    <aside class="left-panel">
+
+      <!-- Upload -->
+      <div class="panel-section">
+        <div class="section-label">Input Source</div>
+        <div class="upload-zone" id="uploadZone">
+          <div class="upload-target">
+            <div class="upload-target-ring"></div>
+          </div>
+          <div class="upload-label">Drop video file or <strong>browse</strong></div>
+          <button class="upload-btn-inline" id="uploadBtn" type="button">Select File</button>
+          <input type="file" id="fileInput" accept="video/*">
+          <div class="file-info" id="fileInfo" style="display:none">
+            <div class="file-name" id="fileName"></div>
+            <div class="file-size" id="fileSize"></div>
+          </div>
+          <div class="upload-progress" id="uploadProgress">
+            <div class="progress-track">
+              <div class="progress-fill" id="uploadProgressFill"></div>
+            </div>
+            <div class="progress-label" id="uploadProgressText">0%</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Configuration -->
+      <div class="panel-section">
+        <div class="section-label">Configuration</div>
+        <div class="config-grid">
+
+          <div class="field">
+            <label class="field-label" for="optFormat">Format</label>
+            <select id="optFormat">
+              <option value="mp4" selected>MP4</option>
+              <option value="hls">HLS</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="optMode">Mode</label>
+            <select id="optMode">
+              <option value="normal" selected>Normal</option>
+              <option value="copy">Copy</option>
+              <option value="smart">Smart</option>
+              <option value="smart-auto">Smart Auto</option>
+            </select>
+          </div>
+
+          <div class="field" id="grpEncoder">
+            <label class="field-label" for="optEncoder">Encoder</label>
+            <select id="optEncoder">
+              <option value="libx264" selected>libx264</option>
+              <option value="h264_videotoolbox">VideoToolbox</option>
+            </select>
+          </div>
+
+          <div class="field" id="grpPreset">
+            <label class="field-label" for="optPreset">Preset</label>
+            <select id="optPreset">
+              <option value="ultrafast">ultrafast</option>
+              <option value="superfast">superfast</option>
+              <option value="veryfast">veryfast</option>
+              <option value="faster">faster</option>
+              <option value="fast">fast</option>
+              <option value="medium" selected>medium</option>
+              <option value="slow">slow</option>
+              <option value="slower">slower</option>
+              <option value="veryslow">veryslow</option>
+            </select>
+          </div>
+
+          <div class="field" id="grpCrf">
+            <label class="field-label" for="optCrf">CRF</label>
+            <input type="number" id="optCrf" min="0" max="51" value="23">
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="optWorkers">Workers</label>
+            <input type="number" id="optWorkers" min="0" value="0" placeholder="0 = auto">
+          </div>
+
+          <div class="field full-width" id="grpTolerance">
+            <label class="field-label" for="optTolerance">Smart Tolerance</label>
+            <div class="range-row">
+              <input type="range" id="optTolerance" min="0.05" max="0.50" step="0.01" value="0.30">
+              <span class="range-value" id="toleranceValue">0.30</span>
+            </div>
+          </div>
+
+          <div class="field full-width">
+            <label class="check-row">
+              <input type="checkbox" id="optVerbose">
+              <span>Verbose logging</span>
+            </label>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Actions -->
+      <div class="panel-section">
+        <div class="actions">
+          <button class="btn btn-analyze" id="btnAnalyze" disabled>
+            <span class="spinner"></span>
+            <span class="btn-text">Analyze</span>
+          </button>
+          <button class="btn btn-transcode" id="btnTranscode" disabled>
+            <span class="spinner"></span>
+            <span class="btn-text">Transcode</span>
+          </button>
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- ═══ RIGHT PANEL ═══ -->
+    <main class="right-panel" id="mainContent">
+
+      <div class="analysis-view" id="analysisView"></div>
+
+      <div class="jobs-section" id="jobsSection">
+        <div class="jobs-heading">Active Jobs</div>
+        <div class="jobs-list" id="jobsList"></div>
+      </div>
+
+      <div class="empty-state" id="emptyState">
+        <div class="empty-graphic">
+          <div class="empty-ring"></div>
+        </div>
+        <div class="empty-text">Awaiting input</div>
+      </div>
+
+    </main>
+  </div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  /* ==================================================================
+   * Utilities
+   * ================================================================== */
+
+  function formatSize(bytes) {
+    if (bytes === 0) return '0 B';
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = Math.floor(Math.log(bytes) / Math.log(1024));
+    if (i >= units.length) i = units.length - 1;
+    return (bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 2) + ' ' + units[i];
+  }
+
+  function formatTime(seconds) {
+    var h = Math.floor(seconds / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
+    var s = (seconds % 60).toFixed(2);
+    if (h > 0) return h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(5, '0');
+    return m + ':' + String(s).padStart(5, '0');
+  }
+
+  function truncId(id) {
+    return typeof id === 'string' ? id.substring(0, 8) : String(id);
+  }
+
+  function esc(str) {
+    var d = document.createElement('div');
+    d.appendChild(document.createTextNode(str));
+    return d.innerHTML;
+  }
+
+  /* ==================================================================
+   * API
+   * ================================================================== */
+
+  var API = {
+    upload: function(file, onProgress) {
+      return new Promise(function(resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        var form = new FormData();
+        form.append('video', file);
+        xhr.open('POST', '/api/upload');
+        xhr.upload.onprogress = function(e) {
+          if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+        };
+        xhr.onload = function() {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try { resolve(JSON.parse(xhr.responseText)); }
+            catch (err) { reject(new Error('Invalid JSON response')); }
+          } else {
+            reject(new Error('Upload failed: ' + xhr.status));
+          }
+        };
+        xhr.onerror = function() { reject(new Error('Network error')); };
+        xhr.send(form);
+      });
+    },
+
+    analyze: function(params) {
+      return fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params)
+      }).then(function(r) {
+        if (!r.ok) throw new Error('Analyze failed: ' + r.status);
+        return r.json();
+      });
+    },
+
+    transcode: function(params) {
+      return fetch('/api/transcode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params)
+      }).then(function(r) {
+        if (!r.ok) throw new Error('Transcode failed: ' + r.status);
+        return r.json();
+      });
+    },
+
+    getJobs: function() {
+      return fetch('/api/jobs').then(function(r) {
+        if (!r.ok) throw new Error('Failed to fetch jobs');
+        return r.json();
+      });
+    },
+
+    getJobFiles: function(id) {
+      return fetch('/api/jobs/' + encodeURIComponent(id) + '/files').then(function(r) {
+        if (!r.ok) throw new Error('Failed to fetch files');
+        return r.json();
+      });
+    },
+
+    cancelJob: function(id) {
+      return fetch('/api/jobs/' + encodeURIComponent(id), { method: 'DELETE' }).then(function(r) {
+        if (!r.ok) throw new Error('Failed to cancel');
+        return r.json();
+      });
+    },
+
+    downloadUrl: function(jobId, filename) {
+      return '/api/download/' + encodeURIComponent(jobId) + '/' + encodeURIComponent(filename);
+    }
+  };
+
+  /* ==================================================================
+   * WebSocket
+   * ================================================================== */
+
+  var WS = {
+    socket: null,
+    timer: null,
+    subs: new Set(),
+
+    connect: function() {
+      var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      try { WS.socket = new WebSocket(proto + '//' + location.host + '/ws'); }
+      catch (e) { WS._retry(); return; }
+
+      WS.socket.onopen = function() {
+        UI.setWs(true);
+        WS.subs.forEach(function(id) { WS._send({ type: 'subscribe', jobId: id }); });
+      };
+
+      WS.socket.onmessage = function(ev) {
+        try { WS._handle(JSON.parse(ev.data)); } catch (e) {}
+      };
+
+      WS.socket.onclose = function() { UI.setWs(false); WS._retry(); };
+      WS.socket.onerror = function() { UI.setWs(false); };
+    },
+
+    subscribe: function(id) {
+      WS.subs.add(id);
+      WS._send({ type: 'subscribe', jobId: id });
+    },
+
+    _send: function(d) {
+      if (WS.socket && WS.socket.readyState === WebSocket.OPEN) WS.socket.send(JSON.stringify(d));
+    },
+
+    _retry: function() {
+      if (WS.timer) return;
+      WS.timer = setTimeout(function() { WS.timer = null; WS.connect(); }, 1000);
+    },
+
+    _handle: function(msg) {
+      if (!msg || !msg.jobId) return;
+      var job = App.jobs.get(msg.jobId);
+      if (!job) return;
+
+      switch (msg.type) {
+        case 'progress':
+          job.phase = msg.phase || job.phase;
+          job.percent = typeof msg.percent === 'number' ? msg.percent : job.percent;
+          job.message = msg.message || '';
+          UI.updateJob(msg.jobId);
+          break;
+        case 'log':
+          if (msg.line) {
+            if (!job.logs) job.logs = [];
+            job.logs.push(msg.line);
+            if (job.logs.length > 200) job.logs = job.logs.slice(-200);
+            UI.addLog(msg.jobId, msg.line);
+            UI.parseSegStatus(msg.jobId, msg.line);
+          }
+          break;
+        case 'complete':
+          job.phase = 'complete';
+          job.percent = 100;
+          job.outputFiles = msg.outputFiles || [];
+          WS.subs.delete(msg.jobId);
+          UI.updateJob(msg.jobId);
+          if (job.outputFiles.length === 0) {
+            API.getJobFiles(msg.jobId).then(function(d) {
+              job.outputFiles = (d && d.files) ? d.files : (Array.isArray(d) ? d : []);
+              UI.updateJob(msg.jobId);
+            }).catch(function() {});
+          }
+          break;
+        case 'error':
+          job.phase = 'error';
+          job.errorMessage = msg.message || 'Unknown error';
+          WS.subs.delete(msg.jobId);
+          UI.updateJob(msg.jobId);
+          break;
+      }
+    }
+  };
+
+  /* ==================================================================
+   * UI
+   * ================================================================== */
+
+  var VU_SEGMENTS = 30; // number of LED segments in the VU meter
+
+  var UI = {
+    els: {},
+
+    init: function() {
+      var ids = [
+        'uploadZone', 'uploadBtn', 'fileInput', 'fileInfo', 'fileName', 'fileSize',
+        'uploadProgress', 'uploadProgressFill', 'uploadProgressText',
+        'optMode', 'optTolerance', 'toleranceValue', 'grpTolerance', 'grpCrf', 'grpPreset', 'grpEncoder',
+        'btnAnalyze', 'btnTranscode', 'wsDot', 'wsLabel',
+        'analysisView', 'jobsSection', 'jobsList', 'mainContent', 'emptyState'
+      ];
+      ids.forEach(function(id) { UI.els[id] = document.getElementById(id); });
+    },
+
+    bind: function() {
+      var zone = UI.els.uploadZone;
+
+      zone.addEventListener('dragover', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        zone.classList.add('drag-over');
+      });
+      zone.addEventListener('dragleave', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        zone.classList.remove('drag-over');
+      });
+      zone.addEventListener('drop', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        zone.classList.remove('drag-over');
+        if (e.dataTransfer.files.length > 0) App.handleFile(e.dataTransfer.files[0]);
+      });
+
+      UI.els.uploadBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        UI.els.fileInput.click();
+      });
+
+      zone.addEventListener('click', function(e) {
+        if (e.target === zone || e.target.closest('.upload-target') || e.target.closest('.upload-label')) {
+          UI.els.fileInput.click();
+        }
+      });
+
+      UI.els.fileInput.addEventListener('change', function() {
+        if (this.files.length > 0) App.handleFile(this.files[0]);
+      });
+
+      UI.els.optMode.addEventListener('change', function() { UI.syncSettings(); });
+
+      UI.els.optTolerance.addEventListener('input', function() {
+        UI.els.toleranceValue.textContent = parseFloat(this.value).toFixed(2);
+      });
+
+      UI.els.btnAnalyze.addEventListener('click', function() { App.analyze(); });
+      UI.els.btnTranscode.addEventListener('click', function() { App.transcode(); });
+
+      UI.syncSettings();
+    },
+
+    syncSettings: function() {
+      var mode = UI.els.optMode.value;
+      var isCopy = (mode === 'copy');
+      var isSmart = (mode === 'smart' || mode === 'smart-auto');
+      UI.els.grpTolerance.classList.toggle('hidden', !isSmart);
+      UI.els.grpCrf.classList.toggle('hidden', isCopy);
+      UI.els.grpPreset.classList.toggle('hidden', isCopy);
+      UI.els.grpEncoder.classList.toggle('hidden', isCopy);
+    },
+
+    getSettings: function() {
+      var mode = UI.els.optMode.value;
+      var p = {
+        uploadId: App.uploadId,
+        format: document.getElementById('optFormat').value,
+        mode: mode,
+        workers: parseInt(document.getElementById('optWorkers').value, 10) || 0,
+        verbose: document.getElementById('optVerbose').checked
+      };
+      if (mode === 'smart' || mode === 'smart-auto') {
+        p.smartTolerance = parseFloat(UI.els.optTolerance.value);
+      }
+      if (mode !== 'copy') {
+        p.crf = parseInt(document.getElementById('optCrf').value, 10);
+        p.preset = document.getElementById('optPreset').value;
+        p.encoder = document.getElementById('optEncoder').value;
+      }
+      return p;
+    },
+
+    setWs: function(on) {
+      UI.els.wsDot.classList.toggle('connected', on);
+      UI.els.wsLabel.textContent = on ? 'Online' : 'Offline';
+    },
+
+    setBtnLoading: function(btn, loading) {
+      if (loading) { btn.classList.add('loading'); btn.disabled = true; }
+      else { btn.classList.remove('loading'); btn.disabled = !App.uploadId; }
+    },
+
+    updateEmpty: function() {
+      var has = UI.els.analysisView.classList.contains('visible') ||
+                UI.els.jobsSection.classList.contains('visible');
+      UI.els.emptyState.style.display = has ? 'none' : 'flex';
+    },
+
+    /* ─── Analysis ─── */
+
+    renderAnalysis: function(data) {
+      var h = '<div class="analysis-card">';
+      h += '<div class="analysis-header">';
+      h += '<h2>Analysis Report</h2>';
+      if (data.summary) {
+        h += '<div class="analysis-summary">';
+        h += '<span class="badge badge-copy">' + (data.summary.copy_segments || 0) + ' copy</span>';
+        h += '<span class="badge badge-encode">' + (data.summary.encode_segments || 0) + ' encode</span>';
+        h += '<span class="badge badge-total">' + (data.summary.total_segments || 0) + ' total</span>';
+        h += '</div>';
+      }
+      h += '</div><div class="analysis-body">';
+
+      if (data.summary && data.summary.global_blockers && data.summary.global_blockers.length > 0) {
+        h += '<div class="global-blockers">';
+        data.summary.global_blockers.forEach(function(b) {
+          h += '<div class="blocker-item">' + esc(b) + '</div>';
+        });
+        h += '</div>';
+      }
+
+      if (data.segments && data.segments.length > 0) {
+        h += '<div class="segments-table-wrap"><table class="segments-table">';
+        h += '<thead><tr><th>ID</th><th>Time Range</th><th>Decision</th><th>Bitrate Ratio</th><th>Reasons</th></tr></thead>';
+        h += '<tbody>';
+        data.segments.forEach(function(seg) {
+          var bc = seg.decision === 'copy' ? 'badge-copy' : 'badge-encode';
+          var reasons = (seg.reasons && seg.reasons.length > 0) ? seg.reasons.map(esc).join('; ') : '<span style="color:var(--text-muted)">--</span>';
+          h += '<tr>';
+          h += '<td>' + seg.id + '</td>';
+          h += '<td>' + formatTime(seg.start_time) + ' \u2013 ' + formatTime(seg.end_time) + '</td>';
+          h += '<td><span class="badge ' + bc + '">' + esc(seg.decision) + '</span></td>';
+          h += '<td>' + (typeof seg.bitrate_ratio === 'number' ? seg.bitrate_ratio.toFixed(2) : '--') + '</td>';
+          h += '<td class="reasons-cell">' + reasons + '</td>';
+          h += '</tr>';
+        });
+        h += '</tbody></table></div>';
+      }
+
+      h += '</div></div>';
+      UI.els.analysisView.innerHTML = h;
+      UI.els.analysisView.classList.add('visible');
+      UI.updateEmpty();
+    },
+
+    /* ─── Job Cards ─── */
+
+    createJobCard: function(jobId) {
+      var job = App.jobs.get(jobId);
+      if (!job) return;
+
+      UI.els.jobsSection.classList.add('visible');
+      UI.updateEmpty();
+
+      var card = document.createElement('div');
+      card.className = 'job-card';
+      card.id = 'job-' + jobId;
+
+      card.innerHTML =
+        '<div class="job-card-header">' +
+          '<span class="job-id">' + esc(truncId(jobId)) + '</span>' +
+          '<div class="job-actions">' +
+            '<span class="badge badge-analyzing" data-role="phase-badge">Pending</span>' +
+            '<button class="btn-cancel" data-role="cancel-btn">Cancel</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="job-card-body">' +
+          '<div class="vu-meter-wrap">' +
+            '<div class="vu-meter-header">' +
+              '<span class="vu-phase" data-role="phase-text">Waiting...</span>' +
+              '<span class="vu-percent" data-role="percent-text">0%</span>' +
+            '</div>' +
+            '<div class="vu-meter" data-role="vu-meter">' + UI._buildVU() + '</div>' +
+            '<div class="simple-bar" data-role="simple-bar"><div class="simple-bar-fill" data-role="simple-bar-fill"></div></div>' +
+          '</div>' +
+          '<div class="segment-strip" data-role="segment-strip"></div>' +
+          '<div class="log-tail" data-role="log-tail"></div>' +
+          '<div class="download-links" data-role="download-links" style="display:none"></div>' +
+        '</div>';
+
+      card.querySelector('[data-role="cancel-btn"]').addEventListener('click', function() {
+        App.cancelJob(jobId);
+      });
+
+      UI.els.jobsList.prepend(card);
+      UI.updateJob(jobId);
+    },
+
+    _buildVU: function() {
+      var h = '';
+      for (var i = 0; i < VU_SEGMENTS; i++) h += '<div class="vu-seg"></div>';
+      return h;
+    },
+
+    updateJob: function(jobId) {
+      var card = document.getElementById('job-' + jobId);
+      if (!card) return;
+      var job = App.jobs.get(jobId);
+      if (!job) return;
+
+      var phaseBadge = card.querySelector('[data-role="phase-badge"]');
+      var phaseText = card.querySelector('[data-role="phase-text"]');
+      var percentText = card.querySelector('[data-role="percent-text"]');
+      var vuMeter = card.querySelector('[data-role="vu-meter"]');
+      var simpleBarFill = card.querySelector('[data-role="simple-bar-fill"]');
+      var cancelBtn = card.querySelector('[data-role="cancel-btn"]');
+      var dlLinks = card.querySelector('[data-role="download-links"]');
+
+      var phase = job.phase || 'pending';
+      var pm = {
+        pending:    { cls: 'badge-analyzing', label: 'Pending' },
+        starting:   { cls: 'badge-analyzing', label: 'Starting' },
+        analyzing:  { cls: 'badge-analyzing', label: 'Analyzing' },
+        splitting:  { cls: 'badge-splitting', label: 'Splitting' },
+        encoding:   { cls: 'badge-encoding',  label: 'Encoding' },
+        finalizing: { cls: 'badge-finalizing', label: 'Finalizing' },
+        complete:   { cls: 'badge-complete',  label: 'Complete' },
+        error:      { cls: 'badge-error',     label: 'Error' },
+        cancelled:  { cls: 'badge-cancelled', label: 'Cancelled' }
+      };
+      var pi = pm[phase] || pm.pending;
+      phaseBadge.className = 'badge ' + pi.cls;
+      phaseBadge.textContent = pi.label;
+
+      // Phase text
+      var msg = job.message || (pi.label + '...');
+      if (phase === 'complete') msg = 'Completed';
+      if (phase === 'error') msg = job.errorMessage || 'Error';
+      if (phase === 'cancelled') msg = 'Cancelled';
+      phaseText.textContent = msg;
+
+      // Percent
+      var pct = job.percent || 0;
+      percentText.textContent = Math.round(pct) + '%';
+
+      // VU meter: light up segments
+      var litCount = Math.round((pct / 100) * VU_SEGMENTS);
+      var segs = vuMeter.children;
+      for (var i = 0; i < segs.length; i++) {
+        if (i < litCount) {
+          // Green zone: 0-70%, amber: 70-90%, red: 90-100%
+          var ratio = i / VU_SEGMENTS;
+          if (phase === 'error') segs[i].className = 'vu-seg lit-red';
+          else if (phase === 'complete') segs[i].className = 'vu-seg lit-green';
+          else if (ratio >= 0.9) segs[i].className = 'vu-seg lit-red';
+          else if (ratio >= 0.7) segs[i].className = 'vu-seg lit-amber';
+          else segs[i].className = 'vu-seg lit-green';
+        } else {
+          segs[i].className = 'vu-seg';
+        }
+      }
+
+      // Simple bar fallback
+      simpleBarFill.style.width = pct + '%';
+      simpleBarFill.classList.toggle('complete', phase === 'complete');
+      simpleBarFill.classList.toggle('error', phase === 'error');
+
+      // Card accent
+      card.className = 'job-card' + (phase === 'complete' ? ' phase-complete' : '') + (phase === 'error' ? ' phase-error' : '');
+
+      // Cancel btn
+      var active = (phase !== 'complete' && phase !== 'error' && phase !== 'cancelled');
+      cancelBtn.style.display = active ? 'inline-flex' : 'none';
+
+      // Downloads
+      if (phase === 'complete' && job.outputFiles && job.outputFiles.length > 0) {
+        var lh = '';
+        job.outputFiles.forEach(function(f) {
+          var name = typeof f === 'string' ? f : f.name || f.filename || '';
+          if (!name) return;
+          lh += '<a class="download-link" href="' + esc(API.downloadUrl(jobId, name)) +
+                '" download="' + esc(name) + '">' + esc(name) + '</a>';
+        });
+        dlLinks.innerHTML = lh;
+        dlLinks.style.display = lh ? 'flex' : 'none';
+      }
+    },
+
+    addLog: function(jobId, line) {
+      var card = document.getElementById('job-' + jobId);
+      if (!card) return;
+      var tail = card.querySelector('[data-role="log-tail"]');
+      if (!tail) return;
+      var el = document.createElement('div');
+      el.className = 'log-line';
+      el.textContent = line;
+      tail.appendChild(el);
+      while (tail.children.length > 25) tail.removeChild(tail.firstChild);
+      tail.scrollTop = tail.scrollHeight;
+    },
+
+    parseSegStatus: function(jobId, line) {
+      var job = App.jobs.get(jobId);
+      if (!job) return;
+      var card = document.getElementById('job-' + jobId);
+      if (!card) return;
+      var strip = card.querySelector('[data-role="segment-strip"]');
+      if (!strip) return;
+
+      var segMatch = line.match(/[Ss]egment\s+(\d+)\s*:\s*(encoding|done|copied|complete|pending|in.?progress)/i);
+      if (segMatch) {
+        var idx = parseInt(segMatch[1], 10);
+        var st = segMatch[2].toLowerCase();
+        if (st === 'complete') st = 'done';
+        if (st === 'in-progress' || st === 'in progress') st = 'encoding';
+        if (idx < strip.children.length) strip.children[idx].className = 'seg-block ' + st;
+      }
+
+      var countMatch = line.match(/(\d+)\s+segments?\s+(found|total|created)/i);
+      if (countMatch && !job._segInit) {
+        var count = parseInt(countMatch[1], 10);
+        if (count > 0 && count < 500) {
+          job.segments = count;
+          job._segInit = true;
+          strip.innerHTML = '';
+          for (var i = 0; i < count; i++) {
+            var b = document.createElement('div');
+            b.className = 'seg-block pending';
+            strip.appendChild(b);
+          }
+        }
+      }
+    }
+  };
+
+  /* ==================================================================
+   * App
+   * ================================================================== */
+
+  var App = {
+    uploadId: null,
+    jobs: new Map(),
+
+    init: function() {
+      UI.init();
+      UI.bind();
+      WS.connect();
+      App.loadJobs();
+    },
+
+    loadJobs: function() {
+      API.getJobs().then(function(data) {
+        var list = Array.isArray(data) ? data : (data && data.jobs ? data.jobs : []);
+        if (list.length === 0) return;
+        list.forEach(function(j) {
+          var id = j.jobId || j.id;
+          if (!id) return;
+          App.jobs.set(id, {
+            phase: j.phase || j.status || 'pending',
+            percent: j.percent || 0,
+            message: j.message || '',
+            logs: [],
+            segments: j.segments || 0,
+            outputFiles: j.outputFiles || []
+          });
+          UI.createJobCard(id);
+          var ph = j.phase || j.status || 'pending';
+          if (ph !== 'complete' && ph !== 'error' && ph !== 'cancelled') WS.subscribe(id);
+        });
+      }).catch(function() {});
+    },
+
+    handleFile: function(file) {
+      if (!file) return;
+
+      UI.els.fileInfo.style.display = 'block';
+      UI.els.fileName.textContent = file.name;
+      UI.els.fileSize.textContent = formatSize(file.size);
+      UI.els.uploadZone.classList.add('has-file');
+
+      UI.els.uploadProgress.classList.add('active');
+      UI.els.uploadProgressFill.style.width = '0%';
+      UI.els.uploadProgressText.textContent = '0%';
+
+      UI.els.btnAnalyze.disabled = true;
+      UI.els.btnTranscode.disabled = true;
+      App.uploadId = null;
+
+      API.upload(file, function(pct) {
+        UI.els.uploadProgressFill.style.width = pct + '%';
+        UI.els.uploadProgressText.textContent = pct + '%';
+      }).then(function(resp) {
+        App.uploadId = resp.uploadId || resp.id || resp.upload_id;
+        UI.els.uploadProgressFill.style.width = '100%';
+        UI.els.uploadProgressText.textContent = 'Upload complete';
+        UI.els.btnAnalyze.disabled = false;
+        UI.els.btnTranscode.disabled = false;
+      }).catch(function(err) {
+        UI.els.uploadProgressText.textContent = 'Upload failed';
+        UI.els.uploadProgressFill.style.width = '0%';
+        UI.els.uploadZone.classList.remove('has-file');
+        console.error('Upload error:', err);
+      });
+    },
+
+    analyze: function() {
+      if (!App.uploadId) return;
+      UI.setBtnLoading(UI.els.btnAnalyze, true);
+      API.analyze(UI.getSettings()).then(function(data) {
+        UI.setBtnLoading(UI.els.btnAnalyze, false);
+        UI.renderAnalysis(data);
+      }).catch(function(err) {
+        UI.setBtnLoading(UI.els.btnAnalyze, false);
+        console.error('Analyze error:', err);
+        alert('Analysis failed: ' + err.message);
+      });
+    },
+
+    transcode: function() {
+      if (!App.uploadId) return;
+      UI.setBtnLoading(UI.els.btnTranscode, true);
+      API.transcode(UI.getSettings()).then(function(data) {
+        UI.setBtnLoading(UI.els.btnTranscode, false);
+        var jobId = data.jobId || data.id || data.job_id;
+        if (!jobId) { console.error('No jobId'); return; }
+        App.jobs.set(jobId, {
+          phase: 'pending', percent: 0, message: '', logs: [], segments: 0, outputFiles: []
+        });
+        UI.createJobCard(jobId);
+        WS.subscribe(jobId);
+      }).catch(function(err) {
+        UI.setBtnLoading(UI.els.btnTranscode, false);
+        console.error('Transcode error:', err);
+        alert('Transcode failed: ' + err.message);
+      });
+    },
+
+    cancelJob: function(jobId) {
+      var job = App.jobs.get(jobId);
+      if (!job) return;
+      API.cancelJob(jobId).then(function() {
+        job.phase = 'cancelled';
+        WS.subs.delete(jobId);
+        UI.updateJob(jobId);
+      }).catch(function(err) { console.error('Cancel error:', err); });
+    }
+  };
+
+  /* ==================================================================
+   * Boot
+   * ================================================================== */
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', App.init);
+  } else {
+    App.init();
+  }
+
+})();
+</script>
+</body>
+</html>

@@ -39,6 +39,10 @@ test-videos/
 *.ts
 *.m3u8
 
+# Web UI uploads/outputs
+web/uploads/
+web/outputs/
+
 # Environment
 .env
 .env.local

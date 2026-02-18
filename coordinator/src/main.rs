@@ -1,6 +1,13 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
-use tracing::{info, warn};
+use futures::stream::{self, StreamExt};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+use tempfile::TempDir;
+use tokio::process::Command;
+use tracing::{debug, error, info, warn};
 
 mod analyzer;
 mod segmenter;
@@ -25,17 +32,126 @@ struct Args {
     #[arg(short, long, default_value = "10.0")]
     segment_duration: f64,
 
-    /// Look-ahead frames for optimization
-    #[arg(short, long, default_value = "40")]
-    lookahead: usize,
-
     /// Output format: hls or mp4
     #[arg(short, long, default_value = "hls")]
     format: String,
 
+    /// CRF value for quality-based encoding
+    #[arg(short, long, default_value = "23")]
+    crf: u32,
+
+    /// Encoding preset
+    #[arg(short, long, default_value = "medium")]
+    preset: String,
+
+    /// Encoder to use (libx264 or h264_videotoolbox)
+    #[arg(short = 'E', long, default_value = "libx264")]
+    encoder: String,
+
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Fast mode: use ffprobe analysis + pre-split segments (skips full decode analysis)
+    #[arg(long)]
+    fast: bool,
+
+    /// Copy mode: stream-copy all segments without re-encoding (implies --fast)
+    #[arg(long)]
+    copy: bool,
+
+    /// Smart mode: per-segment copy-vs-encode decision based on GOP bitrate analysis (implies --fast)
+    #[arg(long)]
+    smart: bool,
+
+    /// Bitrate tolerance for smart mode (0.0-1.0, default 0.3 = ±30%)
+    #[arg(long, default_value = "0.3")]
+    smart_tolerance: f64,
+
+    /// Smart auto-tune: automatically compute tolerance from GOP bitrate distribution (implies --smart)
+    #[arg(long)]
+    smart_auto: bool,
+
+    /// Smart report: dry-run analysis showing per-segment copy/encode decisions as JSON (implies --smart)
+    #[arg(long)]
+    smart_report: bool,
+}
+
+/// Segment descriptor sent to the worker process (matches worker's SegmentDescriptor).
+#[derive(Debug, Serialize)]
+struct SegmentDescriptor {
+    id: usize,
+    start_frame: u64,
+    end_frame: u64,
+    start_timestamp: f64,
+    end_timestamp: f64,
+    lookahead_frames: Option<usize>,
+    complexity_estimate: f32,
+    scene_changes: Vec<u64>,
+}
+
+/// Result returned by a worker process via stdout JSON.
+#[derive(Debug, Deserialize)]
+struct WorkerResult {
+    segment_id: usize,
+    worker_id: usize,
+    frames_encoded: u64,
+    output_size_bytes: u64,
+    encoding_time_secs: f64,
+    average_complexity: f32,
+    scene_changes_detected: u64,
+    output_path: String,
+}
+
+/// Reasons a segment cannot be stream-copied.
+#[derive(Debug, Clone, Serialize)]
+enum CopyBlocker {
+    CodecMismatch { source: String, target: String },
+    ProfileIncompatible { source: String, target: String },
+    PixFmtMismatch { source: String, target: String },
+    NoGopData,
+    BitrateTooFar { ratio: f64, tolerance: f64 },
+}
+
+/// Smart mode report output (JSON to stdout).
+#[derive(Debug, Serialize)]
+struct SmartReport {
+    input: String,
+    segments: Vec<SegmentReport>,
+    summary: ReportSummary,
+}
+
+#[derive(Debug, Serialize)]
+struct SegmentReport {
+    id: usize,
+    start_time: f64,
+    end_time: f64,
+    decision: String, // "copy" or "encode"
+    bitrate_ratio: Option<f64>,
+    reasons: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReportSummary {
+    total_segments: usize,
+    copy_segments: usize,
+    encode_segments: usize,
+    global_blockers: Vec<String>,
+}
+
+impl From<&segmenter::Segment> for SegmentDescriptor {
+    fn from(seg: &segmenter::Segment) -> Self {
+        SegmentDescriptor {
+            id: seg.id,
+            start_frame: seg.start_frame,
+            end_frame: seg.end_frame,
+            start_timestamp: seg.start_timestamp,
+            end_timestamp: seg.end_timestamp,
+            lookahead_frames: None,
+            complexity_estimate: seg.complexity_estimate,
+            scene_changes: seg.contains_scene_changes.clone(),
+        }
+    }
 }
 
 #[tokio::main]
@@ -47,7 +163,16 @@ async fn main() -> Result<()> {
         .with_env_filter(log_level)
         .init();
 
+    // --copy, --smart, --smart-auto, --smart-report imply --fast (need ffprobe + pre-split)
+    let smart = args.smart || args.smart_auto || args.smart_report;
+    let fast = args.fast || args.copy || smart;
+
     info!("Parallel Video Transcoder Coordinator v0.1.0");
+    if args.copy {
+        info!("Mode: COPY (stream-copy, no re-encoding)");
+    } else if smart {
+        info!("Mode: SMART (per-segment copy-or-encode, tolerance=±{:.0}%)", args.smart_tolerance * 100.0);
+    }
     info!("Input: {}", args.input);
     info!("Output: {}", args.output);
 
@@ -58,11 +183,22 @@ async fn main() -> Result<()> {
     } else {
         args.workers
     };
-    info!("Using {} worker processes", num_workers);
+    if !args.copy {
+        info!("Using {} worker processes", num_workers);
+    }
+
+    let input_path = std::fs::canonicalize(&args.input)
+        .with_context(|| format!("Input file not found: {}", args.input))?;
 
     // Phase 1 — Video Analysis
-    info!("Step 1: Analyzing video...");
-    let metadata = analyzer::analyze_video(&args.input)?;
+    info!("Step 1: Analyzing video{}...", if fast { " (fast mode)" } else { "" });
+    let analysis_start = Instant::now();
+    let metadata = if fast {
+        analyzer::fast_analyze_video(input_path.to_str().unwrap())?
+    } else {
+        analyzer::analyze_video(input_path.to_str().unwrap())?
+    };
+    info!("  Analysis completed in {:.2}s", analysis_start.elapsed().as_secs_f64());
     info!(
         "  Video: {}x{} @ {:.2} fps, {:.2}s, {} total frames",
         metadata.width, metadata.height, metadata.fps, metadata.duration_secs, metadata.total_frames
@@ -72,6 +208,17 @@ async fn main() -> Result<()> {
         metadata.keyframe_positions.len(),
         metadata.scene_changes.len()
     );
+    if !metadata.audio_tracks.is_empty() {
+        info!("  Audio: {} tracks", metadata.audio_tracks.len());
+    }
+    if !metadata.subtitle_tracks.is_empty() {
+        info!("  Subtitles: {} tracks ({} text-based)",
+            metadata.subtitle_tracks.len(),
+            metadata.subtitle_tracks.iter().filter(|t| t.is_text_based).count());
+    }
+    if !metadata.chapters.is_empty() {
+        info!("  Chapters: {}", metadata.chapters.len());
+    }
 
     // Phase 2 — Segmentation
     info!("Step 2: Creating segments...");
@@ -84,15 +231,1018 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Phase 3 — Spawn Workers (TODO)
-    info!("Step 3: Spawning {} workers...", num_workers);
-    warn!("Worker spawning not yet implemented — segments are ready for distribution");
+    // Prepare output directory
+    let output_dir = Path::new(&args.output);
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create output directory: {}", args.output))?;
 
-    // Phase 4 — Reassemble (TODO)
-    info!("Step 4: Reassembling output...");
-    warn!("Output reassembly not yet implemented");
+    // Phase 2.5 — Pre-split segments (fast or copy mode)
+    // Creates small .ts files per segment via stream copy, so each worker reads only its portion.
+    // In copy mode, these pre-split files ARE the final output segments.
+    let presplit_dir: Option<TempDir> = if fast && !args.copy {
+        // Fast mode: pre-split into temp dir (workers will re-encode)
+        Some(TempDir::new().context("Failed to create temp dir for pre-split files")?)
+    } else {
+        None
+    };
 
-    info!("Pipeline complete (analysis + segmentation done, transcoding pending)");
+    // In copy mode, pre-split directly into the output directory
+    let presplit_target_dir = if args.copy {
+        output_dir
+    } else if let Some(ref td) = presplit_dir {
+        td.path()
+    } else {
+        output_dir // won't be used, but need a value
+    };
+
+    let has_text_subs = metadata.subtitle_tracks.iter().any(|t| t.is_text_based);
+
+    let presplit_paths: Option<Vec<PathBuf>> = if fast {
+        info!("Step 2.5: {}splitting {} segments...",
+            if args.copy { "Stream-copy " } else { "Pre-" },
+            segments.len()
+        );
+        let presplit_start = Instant::now();
+        let split_pb = ProgressBar::new(segments.len() as u64);
+        split_pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} segments ({eta} remaining)")
+                .unwrap()
+                .progress_chars("##-"),
+        );
+        let paths = presplit_segments(
+            input_path.to_str().unwrap(),
+            &segments,
+            presplit_target_dir,
+            args.copy, // use segment_NNNN.ts naming in copy mode
+            Some(&split_pb),
+            has_text_subs,
+        ).await?;
+        split_pb.finish_with_message("splitting complete");
+        info!("  {}split completed in {:.2}s",
+            if args.copy { "Stream-copy " } else { "Pre-" },
+            presplit_start.elapsed().as_secs_f64()
+        );
+        Some(paths)
+    } else {
+        None
+    };
+
+    let pipeline_start = Instant::now();
+
+    // --- Smart mode: decide copy vs encode per segment ---
+
+    // Auto-tune tolerance if --smart-auto
+    let smart_tolerance = if args.smart_auto && smart {
+        let target_bitrate = estimate_target_bitrate(
+            metadata.width, metadata.height, args.crf, &args.encoder,
+        );
+        let auto_tol = auto_tune_tolerance(&metadata.gop_stats, target_bitrate, args.smart_tolerance);
+        info!("Smart auto-tune: computed tolerance = ±{:.1}% (max ±{:.0}%)",
+            auto_tol * 100.0, args.smart_tolerance * 100.0);
+        auto_tol
+    } else {
+        args.smart_tolerance
+    };
+
+    // Check global copy-compatibility
+    let global_blockers = if smart {
+        let target_codec = encoder_to_codec(&args.encoder);
+        let blockers = check_copy_compatibility(&metadata, target_codec, &args.encoder);
+        if !blockers.is_empty() {
+            info!("Smart mode global compatibility issues:");
+            for b in &blockers {
+                match b {
+                    CopyBlocker::CodecMismatch { source, target } =>
+                        info!("  Codec mismatch: source={}, target={}", source, target),
+                    CopyBlocker::ProfileIncompatible { source, target } =>
+                        info!("  Profile incompatible: source={}, target={}", source, target),
+                    CopyBlocker::PixFmtMismatch { source, target } =>
+                        info!("  Pixel format mismatch: source={}, target={}", source, target),
+                    _ => {}
+                }
+            }
+        }
+        blockers
+    } else {
+        vec![]
+    };
+
+    // If there are global blockers (codec/profile/pixfmt), force all segments to encode
+    let has_global_blocker = global_blockers.iter().any(|b| matches!(b,
+        CopyBlocker::CodecMismatch { .. } | CopyBlocker::ProfileIncompatible { .. } | CopyBlocker::PixFmtMismatch { .. }
+    ));
+
+    // Determine which segments can be stream-copied and which need re-encoding.
+    let segment_decisions: Vec<bool> = if smart {
+        let target_codec = encoder_to_codec(&args.encoder);
+        let target_bitrate = estimate_target_bitrate(
+            metadata.width, metadata.height, args.crf, &args.encoder,
+        );
+        let codec_match = target_codec == metadata.codec_name;
+
+        info!("Smart mode analysis:");
+        info!("  Source codec: {}, target codec: {} (match={})", metadata.codec_name, target_codec, codec_match);
+        info!("  Estimated target bitrate: {:.1} Mbps (tolerance=±{:.0}%)",
+            target_bitrate / 1_000_000.0, smart_tolerance * 100.0);
+
+        if has_global_blocker {
+            info!("  Global blocker detected — all segments will be re-encoded");
+            vec![false; segments.len()]
+        } else {
+            segments.iter().map(|seg| {
+                if !codec_match {
+                    debug!("  Segment {}: ENCODE (codec mismatch)", seg.id);
+                    return false; // must encode
+                }
+                // Find GOPs that overlap this segment
+                let gop_bitrates: Vec<f64> = metadata.gop_stats.iter()
+                    .filter(|g| g.start_time < seg.end_timestamp && g.end_time > seg.start_timestamp)
+                    .map(|g| g.bitrate_bps)
+                    .collect();
+
+                if gop_bitrates.is_empty() {
+                    debug!("  Segment {}: ENCODE (no GOP data)", seg.id);
+                    return false;
+                }
+
+                let avg_bitrate = gop_bitrates.iter().sum::<f64>() / gop_bitrates.len() as f64;
+                let ratio = avg_bitrate / target_bitrate;
+                let in_range = ratio >= (1.0 - smart_tolerance) && ratio <= (1.0 + smart_tolerance);
+
+                if in_range {
+                    info!("  Segment {}: COPY (bitrate {:.1} Mbps, ratio={:.2})",
+                        seg.id, avg_bitrate / 1_000_000.0, ratio);
+                } else {
+                    info!("  Segment {}: ENCODE (bitrate {:.1} Mbps, ratio={:.2}, out of ±{:.0}% range)",
+                        seg.id, avg_bitrate / 1_000_000.0, ratio, smart_tolerance * 100.0);
+                }
+                in_range
+            }).collect()
+        }
+    } else if args.copy {
+        // Copy mode: all segments are copied
+        vec![true; segments.len()]
+    } else {
+        // Normal mode: all segments are encoded
+        vec![false; segments.len()]
+    };
+
+    let copy_count = segment_decisions.iter().filter(|&&d| d).count();
+    let encode_count = segment_decisions.iter().filter(|&&d| !d).count();
+
+    if smart {
+        info!("Smart decision: {} copy, {} encode out of {} segments",
+            copy_count, encode_count, segments.len());
+    }
+
+    // Smart report mode: print JSON report and exit
+    if args.smart_report {
+        let target_codec = encoder_to_codec(&args.encoder);
+        let target_bitrate = estimate_target_bitrate(
+            metadata.width, metadata.height, args.crf, &args.encoder,
+        );
+        let _ = target_codec; // used for logging above
+
+        let segment_reports: Vec<SegmentReport> = segments.iter().enumerate().map(|(i, seg)| {
+            let gop_bitrates: Vec<f64> = metadata.gop_stats.iter()
+                .filter(|g| g.start_time < seg.end_timestamp && g.end_time > seg.start_timestamp)
+                .map(|g| g.bitrate_bps)
+                .collect();
+            let avg_bitrate = if gop_bitrates.is_empty() { None } else {
+                Some(gop_bitrates.iter().sum::<f64>() / gop_bitrates.len() as f64)
+            };
+            let ratio = avg_bitrate.map(|ab| ab / target_bitrate);
+
+            let mut reasons = Vec::new();
+            if has_global_blocker {
+                for b in &global_blockers {
+                    reasons.push(format!("{:?}", b));
+                }
+            }
+            if !segment_decisions[i] && ratio.is_some() {
+                let r = ratio.unwrap();
+                if r < (1.0 - smart_tolerance) || r > (1.0 + smart_tolerance) {
+                    reasons.push(format!("bitrate ratio {:.2} outside ±{:.0}%", r, smart_tolerance * 100.0));
+                }
+            }
+            if gop_bitrates.is_empty() {
+                reasons.push("no GOP data".to_string());
+            }
+
+            SegmentReport {
+                id: seg.id,
+                start_time: seg.start_timestamp,
+                end_time: seg.end_timestamp,
+                decision: if segment_decisions[i] { "copy".to_string() } else { "encode".to_string() },
+                bitrate_ratio: ratio,
+                reasons,
+            }
+        }).collect();
+
+        let report = SmartReport {
+            input: args.input.clone(),
+            segments: segment_reports,
+            summary: ReportSummary {
+                total_segments: segments.len(),
+                copy_segments: copy_count,
+                encode_segments: encode_count,
+                global_blockers: global_blockers.iter().map(|b| format!("{:?}", b)).collect(),
+            },
+        };
+
+        // JSON to stdout
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        // Human-readable summary to stderr
+        eprintln!("Smart Report: {} total segments, {} copy, {} encode",
+            segments.len(), copy_count, encode_count);
+        if !global_blockers.is_empty() {
+            eprintln!("Global blockers: {}", global_blockers.len());
+        }
+        return Ok(());
+    }
+
+    // Build results: copy segments get WorkerResult directly, encode segments go to workers
+    let mut completed: Vec<WorkerResult> = Vec::new();
+    let mut failures: Vec<(usize, String)> = Vec::new();
+
+    // Handle copied segments (immediate — no workers needed)
+    if let Some(ref paths) = presplit_paths {
+        for (i, seg) in segments.iter().enumerate() {
+            if segment_decisions[i] {
+                let path = &paths[i];
+                // In smart mode, copy pre-split file to output dir with final naming
+                let final_path = if smart {
+                    let dest = output_dir.join(format!("segment_{:04}.ts", seg.id));
+                    std::fs::copy(path, &dest)
+                        .with_context(|| format!("Failed to copy segment {} to output", seg.id))?;
+                    dest
+                } else {
+                    // In copy mode, files are already in output dir
+                    path.clone()
+                };
+
+                let size = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
+                let frames = seg.end_frame.saturating_sub(seg.start_frame) + 1;
+                completed.push(WorkerResult {
+                    segment_id: seg.id,
+                    worker_id: 0,
+                    frames_encoded: frames,
+                    output_size_bytes: size,
+                    encoding_time_secs: 0.0,
+                    average_complexity: seg.complexity_estimate,
+                    scene_changes_detected: seg.contains_scene_changes.len() as u64,
+                    output_path: final_path.to_string_lossy().to_string(),
+                });
+            }
+        }
+    }
+
+    // Handle encoded segments (spawn workers)
+    if encode_count > 0 {
+        let worker_bin = find_worker_binary()?;
+        info!("  Worker binary: {}", worker_bin.display());
+        info!("Step 3: Transcoding {} segments with {} workers...", encode_count, num_workers);
+
+        let multi_progress = MultiProgress::new();
+        let overall_pb = multi_progress.add(ProgressBar::new(encode_count as u64));
+        overall_pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} segments ({eta} remaining)")
+                .unwrap()
+                .progress_chars("##-"),
+        );
+
+        // Build descriptors only for segments that need encoding
+        let encode_descriptors: Vec<(usize, SegmentDescriptor)> = segments
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !segment_decisions[*i])
+            .map(|(i, seg)| (i, SegmentDescriptor::from(seg)))
+            .collect();
+
+        let use_hw_decode = fast
+            && (args.encoder == "h264_videotoolbox" || args.encoder == "videotoolbox");
+
+        let results: Vec<Result<WorkerResult>> = stream::iter(encode_descriptors.into_iter().enumerate())
+            .map(|(worker_id, (seg_idx, desc))| {
+                let input_path = input_path.clone();
+                let output_dir = output_dir.to_path_buf();
+                let worker_bin = worker_bin.clone();
+                let verbose = args.verbose;
+                let crf = args.crf;
+                let preset = args.preset.clone();
+                let encoder = args.encoder.clone();
+                let pb = overall_pb.clone();
+                let presplit_path = presplit_paths
+                    .as_ref()
+                    .map(|paths| paths[seg_idx].clone());
+                async move {
+                    let result = spawn_worker(
+                        &worker_bin,
+                        worker_id,
+                        &desc,
+                        &input_path,
+                        &output_dir,
+                        crf,
+                        &preset,
+                        &encoder,
+                        verbose,
+                        presplit_path.as_deref(),
+                        use_hw_decode,
+                    )
+                    .await;
+                    pb.inc(1);
+                    result
+                }
+            })
+            .buffer_unordered(num_workers)
+            .collect()
+            .await;
+
+        overall_pb.finish_with_message("all segments complete");
+
+        for (i, result) in results.into_iter().enumerate() {
+            match result {
+                Ok(wr) => {
+                    info!(
+                        "  Segment {} done: {} frames, {:.1}s, {} bytes",
+                        wr.segment_id, wr.frames_encoded, wr.encoding_time_secs, wr.output_size_bytes
+                    );
+                    completed.push(wr);
+                }
+                Err(e) => {
+                    error!("  Segment {} failed: {:#}", i, e);
+                    failures.push((i, format!("{:#}", e)));
+                }
+            }
+        }
+    }
+
+    if copy_count > 0 && encode_count > 0 {
+        info!("Smart mode: {} copied + {} encoded = {} total segments",
+            copy_count, encode_count, segments.len());
+    } else if copy_count > 0 {
+        info!("Stream-copy complete: {} segments", copy_count);
+    }
+
+    if !failures.is_empty() {
+        for (id, err) in &failures {
+            error!("  Failed segment {}: {}", id, err);
+        }
+        anyhow::bail!(
+            "{} of {} segments failed to transcode",
+            failures.len(),
+            completed.len() + failures.len()
+        );
+    }
+
+    let pipeline_elapsed = pipeline_start.elapsed();
+
+    // Phase 4 — Reassemble Output
+    info!("Step 4: Assembling output...");
+    let mut completed = completed;
+    completed.sort_by_key(|r| r.segment_id);
+
+    // Extract subtitles as WebVTT for HLS
+    let subtitle_vtt_files = if args.format == "hls" && metadata.subtitle_tracks.iter().any(|t| t.is_text_based) {
+        info!("Extracting subtitle tracks as WebVTT...");
+        extract_subtitles_as_webvtt(
+            input_path.to_str().unwrap(),
+            &metadata.subtitle_tracks,
+            output_dir,
+        ).await?
+    } else {
+        vec![]
+    };
+
+    match args.format.as_str() {
+        "hls" => {
+            let playlist_path = output_dir.join("playlist.m3u8");
+            generate_hls_playlist(&playlist_path, &completed, &segments, metadata.fps,
+                &metadata.audio_tracks, &subtitle_vtt_files)?;
+            info!("  HLS playlist written to {}", playlist_path.display());
+        }
+        "mp4" => {
+            let mp4_path = output_dir.join("output.mp4");
+            let has_audio = !metadata.audio_tracks.is_empty();
+            let audio_source = if has_audio { Some(input_path.to_str().unwrap()) } else { None };
+            concatenate_mp4(&mp4_path, &completed, &metadata.chapters, audio_source)?;
+            info!("  MP4 output written to {}", mp4_path.display());
+        }
+        other => {
+            anyhow::bail!("Unknown output format: {}. Use 'hls' or 'mp4'.", other);
+        }
+    }
+
+    // Summary
+    let total_frames: u64 = completed.iter().map(|r| r.frames_encoded).sum();
+    let total_bytes: u64 = completed.iter().map(|r| r.output_size_bytes).sum();
+    info!("Pipeline complete:");
+    info!("  Total frames: {}", total_frames);
+    info!("  Total output size: {:.2} MB", total_bytes as f64 / 1_048_576.0);
+    info!("  Wall time: {:.1}s", pipeline_elapsed.as_secs_f64());
+    info!(
+        "  Throughput: {:.1} fps",
+        total_frames as f64 / pipeline_elapsed.as_secs_f64()
+    );
 
     Ok(())
+}
+
+/// Spawn a single worker process for a segment and collect its result.
+async fn spawn_worker(
+    worker_bin: &Path,
+    worker_id: usize,
+    desc: &SegmentDescriptor,
+    input_path: &Path,
+    output_dir: &Path,
+    crf: u32,
+    preset: &str,
+    encoder: &str,
+    verbose: bool,
+    presplit_path: Option<&Path>,
+    hw_decode: bool,
+) -> Result<WorkerResult> {
+    let segment_file = output_dir.join(format!("segment_{:04}.ts", desc.id));
+    let segment_json =
+        serde_json::to_string(desc).context("Failed to serialize segment descriptor")?;
+
+    // When pre-split, use the pre-split file as input instead of the full video
+    let worker_input = presplit_path.unwrap_or(input_path);
+
+    let mut cmd = Command::new(worker_bin);
+    cmd.arg("--input")
+        .arg(worker_input)
+        .arg("--output")
+        .arg(&segment_file)
+        .arg("--worker-id")
+        .arg(worker_id.to_string())
+        .arg("--segment")
+        .arg(&segment_json)
+        .arg("--crf")
+        .arg(crf.to_string())
+        .arg("--preset")
+        .arg(preset)
+        .arg("--encoder")
+        .arg(encoder);
+
+    if presplit_path.is_some() {
+        cmd.arg("--presplit");
+    }
+
+    if hw_decode {
+        cmd.arg("--hw-decode");
+    }
+
+    if verbose {
+        cmd.arg("--verbose");
+    }
+
+    // Worker logs to stderr, result JSON to stdout
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let output = cmd
+        .output()
+        .await
+        .with_context(|| format!("Failed to spawn worker for segment {}", desc.id))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "Worker for segment {} exited with {}: {}",
+            desc.id,
+            output.status,
+            stderr.lines().last().unwrap_or("(no output)")
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .context("Worker stdout is not valid UTF-8")?;
+
+    // The worker prints the JSON result as the last line of stdout
+    let json_line = stdout
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with('{'))
+        .ok_or_else(|| anyhow::anyhow!("No JSON result found in worker stdout for segment {}", desc.id))?;
+
+    let result: WorkerResult = serde_json::from_str(json_line)
+        .with_context(|| format!("Failed to parse worker result JSON for segment {}", desc.id))?;
+
+    Ok(result)
+}
+
+/// Generate HLS playlist(s) from completed segment results.
+///
+/// When audio or subtitle tracks exist, generates:
+/// - `playlist.m3u8` (master): EXT-X-MEDIA tags + EXT-X-STREAM-INF
+/// - `video.m3u8` (media): segment listing
+///
+/// When no extra tracks exist, generates a single `playlist.m3u8` (backward compatible).
+fn generate_hls_playlist(
+    playlist_path: &Path,
+    results: &[WorkerResult],
+    segments: &[segmenter::Segment],
+    _fps: f64,
+    audio_tracks: &[analyzer::AudioTrackInfo],
+    subtitle_vtt_files: &[(String, PathBuf)],
+) -> Result<()> {
+    use std::io::Write;
+
+    let max_duration = segments
+        .iter()
+        .map(|s| s.end_timestamp - s.start_timestamp)
+        .fold(0.0f64, f64::max)
+        .ceil() as u64;
+
+    let has_extra_tracks = !audio_tracks.is_empty() || !subtitle_vtt_files.is_empty();
+
+    if has_extra_tracks {
+        // Master playlist
+        let master_path = playlist_path;
+        let media_playlist_name = "video.m3u8";
+        let media_path = playlist_path.parent().unwrap().join(media_playlist_name);
+
+        let mut master = std::fs::File::create(master_path)
+            .with_context(|| format!("Failed to create master playlist: {}", master_path.display()))?;
+
+        writeln!(master, "#EXTM3U")?;
+
+        // Audio renditions
+        for track in audio_tracks {
+            let lang = track.language.as_deref().unwrap_or("und");
+            let name = track.language.as_deref().unwrap_or("Default");
+            let default = if track.is_default { "YES" } else { "NO" };
+            writeln!(master, "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",LANGUAGE=\"{}\",NAME=\"{}\",DEFAULT={},AUTOSELECT=YES",
+                lang, name, default)?;
+        }
+
+        // Subtitle renditions
+        for (lang, vtt_path) in subtitle_vtt_files {
+            let filename = vtt_path.file_name().unwrap_or_default().to_string_lossy();
+            writeln!(master, "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",LANGUAGE=\"{}\",NAME=\"{}\",DEFAULT=NO,AUTOSELECT=YES,URI=\"{}\"",
+                lang, lang, filename)?;
+        }
+
+        // Stream inf
+        let mut stream_inf = "#EXT-X-STREAM-INF:BANDWIDTH=0".to_string();
+        if !audio_tracks.is_empty() {
+            stream_inf.push_str(",AUDIO=\"audio\"");
+        }
+        if !subtitle_vtt_files.is_empty() {
+            stream_inf.push_str(",SUBTITLES=\"subs\"");
+        }
+        writeln!(master, "{}", stream_inf)?;
+        writeln!(master, "{}", media_playlist_name)?;
+
+        // Media playlist (video segments)
+        let mut media = std::fs::File::create(&media_path)
+            .with_context(|| format!("Failed to create media playlist: {}", media_path.display()))?;
+
+        writeln!(media, "#EXTM3U")?;
+        writeln!(media, "#EXT-X-VERSION:3")?;
+        writeln!(media, "#EXT-X-TARGETDURATION:{}", max_duration)?;
+        writeln!(media, "#EXT-X-MEDIA-SEQUENCE:0")?;
+
+        for result in results {
+            let seg = segments.iter().find(|s| s.id == result.segment_id);
+            let duration = seg.map(|s| s.end_timestamp - s.start_timestamp).unwrap_or(0.0);
+            let filename = Path::new(&result.output_path).file_name().unwrap_or_default().to_string_lossy();
+            writeln!(media, "#EXTINF:{:.6},", duration)?;
+            writeln!(media, "{}", filename)?;
+        }
+        writeln!(media, "#EXT-X-ENDLIST")?;
+
+        info!("  HLS master playlist: {}", master_path.display());
+        info!("  HLS media playlist: {}", media_path.display());
+    } else {
+        // Single playlist (backward compatible)
+        let mut f = std::fs::File::create(playlist_path)
+            .with_context(|| format!("Failed to create playlist: {}", playlist_path.display()))?;
+
+        writeln!(f, "#EXTM3U")?;
+        writeln!(f, "#EXT-X-VERSION:3")?;
+        writeln!(f, "#EXT-X-TARGETDURATION:{}", max_duration)?;
+        writeln!(f, "#EXT-X-MEDIA-SEQUENCE:0")?;
+
+        for result in results {
+            let seg = segments.iter().find(|s| s.id == result.segment_id);
+            let duration = seg.map(|s| s.end_timestamp - s.start_timestamp).unwrap_or(0.0);
+            let filename = Path::new(&result.output_path).file_name().unwrap_or_default().to_string_lossy();
+            writeln!(f, "#EXTINF:{:.6},", duration)?;
+            writeln!(f, "{}", filename)?;
+        }
+
+        writeln!(f, "#EXT-X-ENDLIST")?;
+    }
+
+    Ok(())
+}
+
+/// Concatenate .ts segments into a single MP4 using ffmpeg, with optional chapter metadata
+/// and audio muxing from the original source file.
+fn concatenate_mp4(
+    output_path: &Path,
+    results: &[WorkerResult],
+    chapters: &[analyzer::ChapterInfo],
+    audio_source: Option<&str>,
+) -> Result<()> {
+    use std::io::Write;
+
+    let concat_list = output_path.with_extension("concat.txt");
+    {
+        let mut f = std::fs::File::create(&concat_list)?;
+        for result in results {
+            let filename = Path::new(&result.output_path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            writeln!(f, "file '{}'", filename)?;
+        }
+    }
+
+    let mut cmd = std::process::Command::new("ffmpeg");
+    cmd.arg("-y")
+        .arg("-f").arg("concat")
+        .arg("-safe").arg("0")
+        .arg("-i").arg(&concat_list);
+
+    // Input index tracking: 0 = concat video
+    let mut next_input_idx = 1u32;
+
+    // Add audio source as a separate input if provided
+    let audio_input_idx = if let Some(src) = audio_source {
+        let idx = next_input_idx;
+        next_input_idx += 1;
+        cmd.arg("-i").arg(src);
+        Some(idx)
+    } else {
+        None
+    };
+
+    // If chapters exist, write FFMETADATA1 and add as input
+    let metadata_path = output_path.with_extension("metadata.txt");
+    let metadata_input_idx = if !chapters.is_empty() {
+        let mut meta_file = std::fs::File::create(&metadata_path)?;
+        writeln!(meta_file, ";FFMETADATA1")?;
+        for ch in chapters {
+            writeln!(meta_file, "[CHAPTER]")?;
+            writeln!(meta_file, "TIMEBASE=1/1000")?;
+            writeln!(meta_file, "START={}", (ch.start_secs * 1000.0) as i64)?;
+            writeln!(meta_file, "END={}", (ch.end_secs * 1000.0) as i64)?;
+            if let Some(ref title) = ch.title {
+                writeln!(meta_file, "title={}", title)?;
+            }
+        }
+        let idx = next_input_idx;
+        cmd.arg("-i").arg(&metadata_path);
+        Some(idx)
+    } else {
+        None
+    };
+
+    // Map video from concat input (input 0)
+    cmd.arg("-map").arg("0:v");
+
+    // Map audio from original source if available
+    if let Some(idx) = audio_input_idx {
+        cmd.arg("-map").arg(format!("{}:a?", idx));
+    }
+
+    // Map chapter metadata if present
+    if let Some(idx) = metadata_input_idx {
+        cmd.arg("-map_metadata").arg(format!("{}", idx));
+    }
+
+    // Copy video stream, copy audio stream (already encoded in source)
+    cmd.arg("-c:v").arg("copy");
+    if audio_input_idx.is_some() {
+        cmd.arg("-c:a").arg("copy")
+            .arg("-shortest");
+    }
+
+    cmd.arg(output_path);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    info!("Running ffmpeg MP4 mux: {:?}", cmd);
+
+    let output = cmd.output().context("Failed to run ffmpeg for MP4 concatenation")?;
+
+    let _ = std::fs::remove_file(&concat_list);
+    let _ = std::fs::remove_file(&metadata_path);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("ffmpeg concat failed with exit code {}: {}", output.status, stderr);
+    }
+
+    Ok(())
+}
+
+/// Pre-split the input video into per-segment files using ffmpeg stream copy.
+///
+/// Each segment is extracted with `-ss start -to end -c copy` which is nearly instant
+/// since it only copies packets without re-encoding. Workers then read only their
+/// small pre-split file instead of seeking through the full input.
+async fn presplit_segments(
+    input_path: &str,
+    segments: &[segmenter::Segment],
+    output_dir: &Path,
+    final_output: bool,
+    progress: Option<&ProgressBar>,
+    has_text_subs: bool,
+) -> Result<Vec<PathBuf>> {
+    let tasks: Vec<_> = segments
+        .iter()
+        .map(|seg| {
+            let input = input_path.to_string();
+            let filename = if final_output {
+                format!("segment_{:04}.ts", seg.id)
+            } else {
+                format!("presplit_{:04}.ts", seg.id)
+            };
+            let out_path = output_dir.join(filename);
+            let start = seg.start_timestamp;
+            let end = seg.end_timestamp;
+            let id = seg.id;
+            let exclude_text_subs = has_text_subs;
+            async move {
+                let mut ffmpeg_args = vec![
+                    "-y".to_string(),
+                    "-ss".to_string(), format!("{:.6}", start),
+                    "-to".to_string(), format!("{:.6}", end),
+                    "-i".to_string(), input.clone(),
+                    "-map".to_string(), "0".to_string(),
+                ];
+                if exclude_text_subs {
+                    ffmpeg_args.extend(["-map".to_string(), "-0:s".to_string()]);
+                }
+                ffmpeg_args.extend([
+                    "-c".to_string(), "copy".to_string(),
+                    "-avoid_negative_ts".to_string(), "make_zero".to_string(),
+                    out_path.to_str().unwrap().to_string(),
+                ]);
+
+                let output = Command::new("ffmpeg")
+                    .args(&ffmpeg_args)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped())
+                    .output()
+                    .await
+                    .with_context(|| format!("Failed to pre-split segment {}", id))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    anyhow::bail!("ffmpeg pre-split segment {} failed: {}", id, stderr);
+                }
+
+                debug!("Pre-split segment {} -> {}", id, out_path.display());
+                Ok::<PathBuf, anyhow::Error>(out_path)
+            }
+        })
+        .collect();
+
+    // Run all pre-splits in parallel with bounded concurrency
+    let pb = progress.cloned();
+    let results: Vec<Result<PathBuf>> = stream::iter(tasks)
+        .buffer_unordered(8) // up to 8 concurrent ffmpeg processes
+        .inspect(|_| {
+            if let Some(ref pb) = pb {
+                pb.inc(1);
+            }
+        })
+        .collect()
+        .await;
+
+    let mut paths = Vec::with_capacity(results.len());
+    for result in results {
+        paths.push(result?);
+    }
+
+    // Sort by segment id (filename contains the id)
+    paths.sort();
+    Ok(paths)
+}
+
+/// Map encoder name to the codec name that ffprobe reports.
+fn encoder_to_codec(encoder: &str) -> &str {
+    match encoder {
+        "libx264" | "h264_videotoolbox" | "videotoolbox" => "h264",
+        "libx265" | "hevc_videotoolbox" => "hevc",
+        "libvpx-vp9" => "vp9",
+        "libaom-av1" | "libsvtav1" => "av1",
+        other => other,
+    }
+}
+
+/// Estimate the target bitrate (bps) for a given resolution and CRF.
+///
+/// These are empirical estimates for typical video content at CRF 23.
+/// Used by smart mode to decide if source GOPs are close enough to skip re-encoding.
+fn estimate_target_bitrate(width: u32, height: u32, crf: u32, encoder: &str) -> f64 {
+    let pixels = width as f64 * height as f64;
+
+    // Base bitrate estimates for CRF 23 at common resolutions
+    let base_bitrate = if pixels >= 3840.0 * 2160.0 {
+        40_000_000.0  // 4K: ~40 Mbps
+    } else if pixels >= 1920.0 * 1080.0 {
+        8_000_000.0   // 1080p: ~8 Mbps
+    } else if pixels >= 1280.0 * 720.0 {
+        4_000_000.0   // 720p: ~4 Mbps
+    } else {
+        2_000_000.0   // SD: ~2 Mbps
+    };
+
+    // CRF adjustment: each CRF unit roughly corresponds to ~12% bitrate change
+    // CRF 23 is our baseline
+    let crf_factor = 1.12f64.powi(23i32 - crf as i32);
+
+    // VideoToolbox typically produces higher bitrate than libx264 at equivalent quality
+    let encoder_factor = if encoder.contains("videotoolbox") { 2.0 } else { 1.0 };
+
+    base_bitrate * crf_factor * encoder_factor
+}
+
+/// Check global copy-compatibility between source and target encoding settings.
+fn check_copy_compatibility(
+    metadata: &analyzer::VideoMetadata,
+    target_codec: &str,
+    encoder: &str,
+) -> Vec<CopyBlocker> {
+    let mut blockers = Vec::new();
+
+    // Codec check
+    if target_codec != metadata.codec_name {
+        blockers.push(CopyBlocker::CodecMismatch {
+            source: metadata.codec_name.clone(),
+            target: target_codec.to_string(),
+        });
+    }
+
+    // Profile compatibility (only for H.264)
+    if target_codec == "h264" && metadata.profile.is_some() {
+        let source_profile = metadata.profile.as_deref().unwrap();
+        let target_profile = encoder_target_profile(encoder);
+        if !is_profile_compatible(source_profile, target_profile) {
+            blockers.push(CopyBlocker::ProfileIncompatible {
+                source: source_profile.to_string(),
+                target: target_profile.to_string(),
+            });
+        }
+    }
+
+    // Pixel format check
+    if let Some(ref src_pix_fmt) = metadata.pix_fmt {
+        let target_pix = encoder_target_pix_fmt(encoder);
+        if src_pix_fmt != target_pix {
+            blockers.push(CopyBlocker::PixFmtMismatch {
+                source: src_pix_fmt.clone(),
+                target: target_pix.to_string(),
+            });
+        }
+    }
+
+    blockers
+}
+
+/// Rank H.264 profiles: Baseline < Main < High
+fn profile_rank(profile: &str) -> u32 {
+    match profile.to_lowercase().as_str() {
+        "baseline" | "constrained baseline" => 1,
+        "main" => 2,
+        "high" | "high 10" | "high 4:2:2" | "high 4:4:4" | "high 4:4:4 predictive" => 3,
+        _ => 2, // default to Main
+    }
+}
+
+/// Check if source profile is compatible with target (source rank <= target rank).
+fn is_profile_compatible(source: &str, target: &str) -> bool {
+    profile_rank(source) <= profile_rank(target)
+}
+
+/// Default target profile for an encoder.
+fn encoder_target_profile(encoder: &str) -> &str {
+    match encoder {
+        "h264_videotoolbox" | "videotoolbox" => "Main",
+        "libx264" => "High",
+        _ => "High",
+    }
+}
+
+/// Default target pixel format for an encoder.
+fn encoder_target_pix_fmt(encoder: &str) -> &str {
+    match encoder {
+        "libx264" | "h264_videotoolbox" | "videotoolbox" => "yuv420p",
+        "libx265" | "hevc_videotoolbox" => "yuv420p",
+        _ => "yuv420p",
+    }
+}
+
+/// Auto-tune smart tolerance from GOP bitrate distribution.
+fn auto_tune_tolerance(gop_stats: &[analyzer::GopStats], target_bitrate: f64, max_tolerance: f64) -> f64 {
+    if gop_stats.is_empty() || target_bitrate <= 0.0 {
+        return max_tolerance;
+    }
+
+    let ratios: Vec<f64> = gop_stats.iter().map(|g| g.bitrate_bps / target_bitrate).collect();
+    let n = ratios.len() as f64;
+    let mean = ratios.iter().sum::<f64>() / n;
+    let variance = ratios.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n;
+    let stddev = variance.sqrt();
+
+    // Tight cluster near target = tight tolerance; spread out = wider tolerance
+    let tolerance = (2.0 * stddev - (mean - 1.0).abs()).clamp(0.05, max_tolerance);
+
+    tolerance
+}
+
+/// Extract text-based subtitle tracks as WebVTT files for HLS.
+async fn extract_subtitles_as_webvtt(
+    input_path: &str,
+    subtitle_tracks: &[analyzer::SubtitleTrackInfo],
+    output_dir: &Path,
+) -> Result<Vec<(String, PathBuf)>> {
+    let mut results = Vec::new();
+
+    for track in subtitle_tracks {
+        if !track.is_text_based {
+            continue;
+        }
+
+        let lang = track.language.as_deref().unwrap_or("und");
+        let filename = format!("subs_{}.vtt", lang);
+        let out_path = output_dir.join(&filename);
+
+        let output = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-i", input_path,
+                "-map", &format!("0:{}", track.stream_index),
+                "-c:s", "webvtt",
+                out_path.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await
+            .with_context(|| format!("Failed to extract subtitle track {}", track.stream_index))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("Subtitle extraction for track {} failed: {}", track.stream_index, stderr);
+            continue;
+        }
+
+        info!("Extracted subtitle track {} [{}] -> {}", track.stream_index, lang, filename);
+        results.push((lang.to_string(), out_path));
+    }
+
+    Ok(results)
+}
+
+/// Find the worker binary. Checks:
+/// 1. Same directory as the coordinator binary
+/// 2. cargo target directory (for development)
+/// 3. PATH
+fn find_worker_binary() -> Result<PathBuf> {
+    let worker_name = "transcoder-worker";
+
+    // Check same directory as current executable
+    if let Ok(exe) = std::env::current_exe() {
+        let sibling = exe.parent().unwrap().join(worker_name);
+        if sibling.exists() {
+            return Ok(sibling);
+        }
+    }
+
+    // Check if it's in PATH (cargo run scenario — both binaries get built to target/)
+    if let Ok(output) = std::process::Command::new("which")
+        .arg(worker_name)
+        .output()
+    {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Ok(PathBuf::from(path));
+            }
+        }
+    }
+
+    // Last resort: assume cargo workspace — look in target/debug or target/release
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = Path::new(manifest_dir).parent().unwrap();
+    for profile in &["debug", "release"] {
+        let candidate = workspace_root.join("target").join(profile).join(worker_name);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    anyhow::bail!(
+        "Could not find '{}' binary. Build the workspace first with `cargo build`.",
+        worker_name
+    )
 }
