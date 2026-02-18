@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node server/index.js",
     "web": "node web/server.js",
+    "web:stop": "kill $(cat web/.web.pid) 2>/dev/null && echo 'Server stopped.' || echo 'Server not running.'",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [

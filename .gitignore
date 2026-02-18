@@ -42,6 +42,7 @@ test-videos/
 # Web UI uploads/outputs
 web/uploads/
 web/outputs/
+web/.web.pid
 
 # Environment
 .env

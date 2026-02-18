@@ -18,6 +18,7 @@ const OUTPUT_DIR = path.join(__dirname, "outputs");
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const MAX_LOG_LINES = 200;
 const UPLOAD_LIMIT = 10 * 1024 * 1024 * 1024; // 10 GB
+const PID_FILE = path.join(__dirname, ".web.pid");
 
 // ---------------------------------------------------------------------------
 // Ensure directories
@@ -535,8 +536,50 @@ function runCoordinatorSync(args) {
 }
 
 // ---------------------------------------------------------------------------
+// Graceful shutdown
+// ---------------------------------------------------------------------------
+function shutdown(signal) {
+  console.log(`\n${signal} received — shutting down...`);
+
+  // Kill all running coordinator processes
+  for (const job of jobs.values()) {
+    if (job.process) {
+      job.status = "cancelled";
+      job.phase = "cancelled";
+      job.process.kill("SIGTERM");
+      job.process = null;
+    }
+  }
+
+  // Close all WebSocket connections
+  for (const client of wss.clients) {
+    client.close(1001, "Server shutting down");
+  }
+
+  // Stop accepting new connections, then exit
+  server.close(() => {
+    // Remove PID file
+    try { fs.unlinkSync(PID_FILE); } catch {}
+    console.log("Server stopped.");
+    process.exit(0);
+  });
+
+  // Force exit after 5 seconds if graceful shutdown stalls
+  setTimeout(() => {
+    try { fs.unlinkSync(PID_FILE); } catch {}
+    console.error("Forced exit after timeout.");
+    process.exit(1);
+  }, 5000);
+}
+
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+// ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
 server.listen(PORT, () => {
-  console.log(`Parallel Transcoder web server listening on http://localhost:${PORT}`);
+  // Write PID file so `npm run web:stop` can find us
+  fs.writeFileSync(PID_FILE, String(process.pid));
+  console.log(`Parallel Transcoder web server listening on http://localhost:${PORT} (pid ${process.pid})`);
 });
