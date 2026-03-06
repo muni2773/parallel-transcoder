@@ -55,6 +55,26 @@ const subscribers = new Map();
 // ---------------------------------------------------------------------------
 const app = express();
 app.use(express.json());
+
+// CORS — allow any origin for API access
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key");
+  res.header("Access-Control-Allow-Credentials", "true");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+// Optional API key authentication (set TRANSCODER_API_KEY env var to enable)
+const API_KEY = process.env.TRANSCODER_API_KEY || null;
+app.use("/api", (req, res, next) => {
+  if (!API_KEY) return next(); // No key configured — open access
+  const provided = req.headers["x-api-key"] || req.query.api_key;
+  if (provided === API_KEY) return next();
+  res.status(401).json({ error: "Invalid or missing API key" });
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // Multer for uploads
@@ -71,6 +91,19 @@ const upload = multer({ storage, limits: { fileSize: UPLOAD_LIMIT } });
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
+
+// Health / server info
+app.get("/api/health", (_req, res) => {
+  res.json({
+    status: "ok",
+    version: "1.0.0",
+    uptime: Math.floor(process.uptime()),
+    jobs: {
+      total: jobs.size,
+      running: [...jobs.values()].filter(j => j.status === "running").length,
+    },
+  });
+});
 
 // Upload video
 app.post("/api/upload", upload.single("video"), (req, res) => {
@@ -281,6 +314,16 @@ app.get("/api/jobs/:id/files", (req, res) => {
   res.json(files);
 });
 
+// Job logs
+app.get("/api/jobs/:id/logs", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: "Job not found" });
+  const offset = parseInt(req.query.offset || "0", 10);
+  const limit = parseInt(req.query.limit || "100", 10);
+  const lines = job.logs.slice(offset, offset + limit);
+  res.json({ total: job.logs.length, offset, lines });
+});
+
 // Cancel / remove job
 app.delete("/api/jobs/:id", async (req, res) => {
   const job = jobs.get(req.params.id);
@@ -321,6 +364,15 @@ app.get("/api/download/:jobId/:filename", (req, res) => {
   }
 
   res.download(filePath, filename);
+});
+
+// Global error handler
+app.use((err, _req, res, _next) => {
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ error: `Upload error: ${err.message}` });
+  }
+  console.error("Unhandled error:", err);
+  res.status(500).json({ error: "Internal server error" });
 });
 
 // ---------------------------------------------------------------------------
