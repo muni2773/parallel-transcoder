@@ -9,6 +9,7 @@ import fs from "fs";
 import fsp from "fs/promises";
 import { fileURLToPath } from "url";
 import http from "http";
+import https from "https";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const COORDINATOR_BIN = path.join(__dirname, "../bin/transcoder-coordinator");
@@ -122,6 +123,48 @@ app.post("/api/upload", upload.single("video"), (req, res) => {
     originalName: req.file.originalname,
     size: req.file.size,
   });
+});
+
+// Import video from URL
+app.post("/api/url-import", async (req, res) => {
+  const { url } = req.body;
+  if (!url || typeof url !== "string") {
+    return res.status(400).json({ error: "url is required" });
+  }
+
+  // Validate URL scheme
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return res.status(400).json({ error: "Invalid URL" });
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return res.status(400).json({ error: "Only http and https URLs are supported" });
+  }
+
+  // Derive filename from URL path or use a generic name
+  const urlPath = parsed.pathname.split("/").pop() || "video";
+  const safeName = urlPath.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 200);
+  const ext = path.extname(safeName) || ".mp4";
+  const base = path.basename(safeName, ext);
+  const filename = `${base}_${Date.now()}${ext}`;
+  const destPath = path.join(UPLOAD_DIR, filename);
+
+  try {
+    await downloadFile(url, destPath);
+    const stat = fs.statSync(destPath);
+    res.json({
+      uploadId: filename,
+      originalName: safeName,
+      size: stat.size,
+      source: "url",
+    });
+  } catch (err) {
+    // Clean up partial download
+    try { fs.unlinkSync(destPath); } catch {}
+    res.status(500).json({ error: `Download failed: ${err.message}` });
+  }
 });
 
 // Start transcode job
@@ -716,6 +759,46 @@ function submitClusterJob({ jobId, inputPath, format, crf, preset, encoder }) {
       clearTimeout(timer);
       reject(err);
     });
+  });
+}
+
+/** Download a file from a URL, following redirects (up to 5). */
+function downloadFile(url, destPath, maxRedirects = 5) {
+  return new Promise((resolve, reject) => {
+    const doRequest = (currentUrl, redirectsLeft) => {
+      const mod = currentUrl.startsWith("https") ? https : http;
+      const req = mod.get(currentUrl, { headers: { "User-Agent": "ParallelTranscoder/1.0" } }, (res) => {
+        // Follow redirects
+        if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+          if (redirectsLeft <= 0) {
+            reject(new Error("Too many redirects"));
+            return;
+          }
+          const next = new URL(res.headers.location, currentUrl).href;
+          doRequest(next, redirectsLeft - 1);
+          return;
+        }
+
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
+        }
+
+        const file = fs.createWriteStream(destPath);
+        res.pipe(file);
+        file.on("finish", () => { file.close(resolve); });
+        file.on("error", (err) => {
+          try { fs.unlinkSync(destPath); } catch {}
+          reject(err);
+        });
+      });
+      req.on("error", reject);
+      req.setTimeout(300000, () => {
+        req.destroy();
+        reject(new Error("Download timed out"));
+      });
+    };
+    doRequest(url, maxRedirects);
   });
 }
 

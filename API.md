@@ -53,6 +53,35 @@ Upload a video file (multipart/form-data, field name `video`). Max size: 10 GB.
 curl -X POST http://localhost:3000/api/upload -F "video=@video.mp4"
 ```
 
+### Import Video from URL
+`POST /api/url-import`
+
+Download a video from a remote URL into the server's upload directory. Follows up to 5 redirects. Supports HTTP and HTTPS.
+
+**Request body (JSON):**
+```json
+{
+  "url": "https://example.com/video.mp4"
+}
+```
+
+**Response:**
+```json
+{
+  "uploadId": "video_1709654400000.mp4",
+  "originalName": "video.mp4",
+  "size": 104857600,
+  "source": "url"
+}
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:3000/api/url-import \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/video.mp4"}'
+```
+
 ### Start Transcode Job
 `POST /api/transcode`
 

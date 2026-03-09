@@ -420,6 +420,70 @@ body::before {
   border-color: var(--amber);
 }
 
+.input-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 0 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.input-divider::before,
+.input-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.url-input-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.url-input-row input[type="text"] {
+  flex: 1;
+  padding: 9px 12px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.2s var(--ease);
+}
+.url-input-row input[type="text"]:focus {
+  border-color: var(--amber-dim);
+}
+.url-input-row input[type="text"]::placeholder {
+  color: var(--text-muted);
+}
+.url-import-btn {
+  padding: 9px 16px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--amber);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s var(--ease);
+}
+.url-import-btn:hover {
+  background: var(--amber-glow);
+  border-color: var(--amber-dim);
+}
+.url-import-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .file-info {
   margin-top: 14px;
   padding: 10px 14px;
@@ -1361,6 +1425,11 @@ body::before {
             <div class="progress-label" id="uploadProgressText">0%</div>
           </div>
         </div>
+        <div class="input-divider">or</div>
+        <div class="url-input-row">
+          <input type="text" id="urlInput" placeholder="https://example.com/video.mp4">
+          <button class="url-import-btn" id="urlImportBtn" type="button">Import</button>
+        </div>
       </div>
 
       <!-- Configuration -->
@@ -1594,6 +1663,17 @@ body::before {
       });
     },
 
+    importUrl: function(url) {
+      return fetch('/api/url-import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: url })
+      }).then(function(r) {
+        if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Import failed'); });
+        return r.json();
+      });
+    },
+
     downloadUrl: function(jobId, filename) {
       return '/api/download/' + encodeURIComponent(jobId) + '/' + encodeURIComponent(filename);
     }
@@ -1748,7 +1828,7 @@ body::before {
     init: function() {
       var ids = [
         'uploadZone', 'uploadBtn', 'fileInput', 'fileInfo', 'fileName', 'fileSize',
-        'uploadProgress', 'uploadProgressFill', 'uploadProgressText',
+        'uploadProgress', 'uploadProgressFill', 'uploadProgressText', 'urlInput', 'urlImportBtn',
         'optMode', 'optTolerance', 'toleranceValue', 'grpTolerance', 'grpCrf', 'grpPreset', 'grpEncoder',
         'btnAnalyze', 'btnTranscode', 'wsDot', 'wsLabel',
         'analysisView', 'jobsSection', 'jobsList', 'mainContent', 'emptyState'
@@ -1792,6 +1872,11 @@ body::before {
 
       UI.els.optTolerance.addEventListener('input', function() {
         UI.els.toleranceValue.textContent = parseFloat(this.value).toFixed(2);
+      });
+
+      UI.els.urlImportBtn.addEventListener('click', function() { App.importUrl(); });
+      UI.els.urlInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') App.importUrl();
       });
 
       UI.els.btnAnalyze.addEventListener('click', function() { App.analyze(); });
@@ -2108,6 +2193,46 @@ body::before {
           if (ph !== 'complete' && ph !== 'error' && ph !== 'cancelled') WS.subscribe(id);
         });
       }).catch(function() {});
+    },
+
+    importUrl: function() {
+      var url = (UI.els.urlInput.value || '').trim();
+      if (!url) return;
+
+      UI.els.urlImportBtn.disabled = true;
+      UI.els.urlImportBtn.textContent = 'Downloading\u2026';
+
+      UI.els.fileInfo.style.display = 'block';
+      UI.els.fileName.textContent = url.split('/').pop() || url;
+      UI.els.fileSize.textContent = 'Downloading from URL\u2026';
+      UI.els.uploadZone.classList.add('has-file');
+      UI.els.uploadProgress.classList.add('active');
+      UI.els.uploadProgressFill.style.width = '0%';
+      UI.els.uploadProgressText.textContent = 'Downloading\u2026';
+      UI.els.btnAnalyze.disabled = true;
+      UI.els.btnTranscode.disabled = true;
+      App.uploadId = null;
+
+      API.importUrl(url).then(function(resp) {
+        App.uploadId = resp.uploadId;
+        UI.els.fileName.textContent = resp.originalName || url.split('/').pop();
+        UI.els.fileSize.textContent = formatSize(resp.size);
+        UI.els.uploadProgressFill.style.width = '100%';
+        UI.els.uploadProgressText.textContent = 'Import complete';
+        UI.els.btnAnalyze.disabled = false;
+        UI.els.btnTranscode.disabled = false;
+        UI.els.urlImportBtn.disabled = false;
+        UI.els.urlImportBtn.textContent = 'Import';
+      }).catch(function(err) {
+        UI.els.uploadProgressText.textContent = 'Import failed';
+        UI.els.uploadProgressFill.style.width = '0%';
+        UI.els.uploadZone.classList.remove('has-file');
+        UI.els.fileInfo.style.display = 'none';
+        UI.els.urlImportBtn.disabled = false;
+        UI.els.urlImportBtn.textContent = 'Import';
+        console.error('URL import error:', err);
+        alert('URL import failed: ' + err.message);
+      });
     },
 
     handleFile: function(file) {
