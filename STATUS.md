@@ -1,100 +1,58 @@
-# Project Status - Parallel Video Transcoder
+# Project Status — Parallel Video Transcoder
 
-**Last Updated**: 2026-02-10
-**Status**: 🟡 Scaffolding Complete, Implementation Pending
+**Last Updated**: 2026-03-09
+**Status**: Active Development
 
-## Summary
+## Completed
 
-The Parallel Video Transcoder MCPB project has been fully designed, researched, and scaffolded. All architectural decisions are documented, the project structure is in place, and the codebase is ready for implementation.
+- [x] Rust workspace with coordinator, worker, and cluster crates
+- [x] Video analysis module (keyframe detection, scene changes, complexity)
+- [x] Keyframe-aligned segmentation with complexity balancing
+- [x] Coordinator orchestration and worker spawning
+- [x] Multi-codec worker engine (H.264, H.265, AV1)
+- [x] Hardware acceleration: VideoToolbox (macOS), NVENC (NVIDIA), VAAPI (Intel/AMD)
+- [x] 10-bit encoding pipeline for HEVC and AV1
+- [x] Smart mode (skip low-complexity segments)
+- [x] HLS and MP4 output formats
+- [x] Distributed cluster system (`cluster/` crate)
+  - [x] OBS-style OpCode protocol over WebSocket
+  - [x] SRT data plane for segment transfer between nodes
+  - [x] Bully algorithm leader election
+  - [x] Node health monitoring (heartbeat, dead detection)
+  - [x] Complexity-aware segment scheduler
+  - [x] `transcoder-node` daemon binary
+- [x] Coordinator `--cluster` mode for cluster job submission
+- [x] Web UI (Express + WebSocket, dark-themed SPA)
+- [x] REST API with CORS and optional API key auth
+- [x] Cluster API endpoints (status, nodes, transcode)
+- [x] Cross-platform build script (macOS + Linux RHEL/Rocky/Fedora)
+- [x] Platform-aware library paths (DYLD_LIBRARY_PATH / LD_LIBRARY_PATH)
+- [x] Platform-aware GPU detection in web UI
+- [x] Documentation (README, API, STATUS)
 
-## Completed ✅
+## Architecture
 
-- [x] Comprehensive research on parallel video transcoding
-- [x] Architecture design (3-tier: MCP Server → Coordinator → Workers)
-- [x] FFmpeg integration strategy (Rust bindings via ffmpeg-next)
-- [x] Project structure creation
-- [x] Rust workspace with coordinator and worker crates
-- [x] Node.js MCP server with 4 tools
-- [x] MCPB manifest and configuration
-- [x] Build and packaging scripts
-- [x] Git repository initialization
-- [x] Comprehensive documentation (README, CLAUDE.md, PLAN.md, RESEARCH.md)
+```
+cluster/       6 modules — protocol, transport, srt, election, node, scheduler
+coordinator/   3 modules — main, analyzer, segmenter
+worker/        1 module  — multi-codec encoding engine
+web/           Express server + SPA frontend
+```
 
-## In Progress 🚧
+## Binaries
 
-Nothing currently in progress - paused for later resumption.
+| Binary | Description |
+|--------|-------------|
+| `transcoder-coordinator` | Analyzes, segments, and orchestrates local workers |
+| `transcoder-worker` | Encodes a single video segment |
+| `transcoder-node` | Cluster daemon (election, scheduling, SRT) |
 
-## Pending 📋
+## Test Coverage
 
-1. **Video Analysis Module** (`coordinator/src/analyzer.rs`)
-   - Integrate ffmpeg-next crate
-   - Implement keyframe detection
-   - Implement scene change detection
-   - Calculate per-frame complexity estimates
-
-2. **Segmentation Logic** (`coordinator/src/segmenter.rs`)
-   - Create segments aligned to keyframes
-   - Balance segments by complexity
-
-3. **Coordinator Orchestration** (`coordinator/src/main.rs`)
-   - Spawn worker processes
-   - Collect and aggregate results
-   - Generate HLS playlist
-
-4. **Worker Transcoding** (`worker/src/main.rs`)
-   - Decode assigned segment
-   - Implement look-ahead buffer
-   - Encode with optimized parameters
-
-5. **Look-Ahead Algorithms** (`worker/src/lookahead.rs`)
-   - Scene change detection
-   - Spatial/temporal complexity calculation
-   - Histogram comparison
-
-6. **Testing & Validation**
-   - Unit tests for all modules
-   - Integration tests
-   - Performance benchmarks (vs baseline FFmpeg)
-
-## Project Stats
-
-- **Location**: `/Volumes/FastDisk3TB/muni/Developer/parallel-transcoder/`
-- **Files**: 17 created (Rust, Node.js, docs)
-- **Lines of Code**: 1,792 (scaffolding + documentation)
-- **Git Commits**: 2
-- **Estimated Time to Complete**: 7-10 days of development
-
-## Quick Resume Guide
-
-When resuming work:
-
-1. **Navigate to project**:
-   ```bash
-   cd /Volumes/FastDisk3TB/muni/Developer/parallel-transcoder
-   ```
-
-2. **Review documentation**:
-   - `README.md` - Project overview
-   - `docs/PLAN.md` - Complete implementation plan
-   - `CLAUDE.md` - Development guidelines
-
-3. **Start with**: Implement `coordinator/src/analyzer.rs` for video analysis
-
-4. **Test build**:
-   ```bash
-   cargo check
-   ```
-
-## Key Resources
-
-- Detailed implementation plan: `docs/PLAN.md`
-- Research findings: `docs/RESEARCH.md`
-- MCPB examples: `/Volumes/FastDisk3TB/muni/Developer/mcpb/examples/`
-- ffmpeg-next docs: https://docs.rs/ffmpeg-next/
-
-## Notes
-
-- All architecture decisions are research-backed and documented
-- Rust dependencies are configured but not yet downloaded (run `cargo check`)
-- Node.js dependencies need installation (`npm install`)
-- FFmpeg development libraries required for building
+- `cluster/src/protocol.rs` — 8 tests
+- `cluster/src/transport.rs` — 2 tests
+- `cluster/src/srt.rs` — 4 tests
+- `cluster/src/election.rs` — 14 tests
+- `cluster/src/node.rs` — 14 tests
+- `cluster/src/scheduler.rs` — 16 tests
+- **Total**: 58 unit tests in cluster crate

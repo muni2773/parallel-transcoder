@@ -125,4 +125,3 @@ This document summarizes key research findings that informed the design of the P
 ---
 
 **Last Updated**: 2026-02-10
-**Research Conducted By**: Claude Sonnet 4.5 via Explore agents

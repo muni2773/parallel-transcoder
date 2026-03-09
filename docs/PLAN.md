@@ -1,8 +1,8 @@
-# Massively Parallel Video Transcoding MCPB Bundle - Implementation Plan
+# Massively Parallel Video Transcoding - Implementation Plan
 
 ## Context
 
-Building an MCPB (MCP Bundle) application for massively parallel video transcoding with intelligent look-ahead optimization. This bundle will enable users to transcode videos significantly faster by:
+Building a massively parallel video transcoding application with intelligent look-ahead optimization. This system enables users to transcode videos significantly faster by:
 
 1. **Parallel Processing**: Splitting video into segments and processing them simultaneously across multiple subagents/workers
 2. **Look-Ahead Optimization**: Analyzing future frames to avoid unnecessary compute (scene change detection, complexity analysis, adaptive frame decisions)
@@ -18,10 +18,10 @@ The goal is to minimize transcoding time while maintaining quality through intel
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                   MCP Server (Node.js)                   │
-│  - Receives video transcoding requests from Claude       │
+│                   Web Server (Node.js)                    │
+│  - Receives video transcoding requests via REST API      │
 │  - Coordinates Rust transcoding engine                   │
-│  - Returns progress and results via MCP protocol         │
+│  - Returns progress and results via WebSocket            │
 └─────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────┐
@@ -148,15 +148,13 @@ After research, **using Rust FFmpeg bindings** is the most practical approach:
 
 ---
 
-## MCPB Bundle Structure
+## Distribution Structure
 
 ### Directory Layout
 
 ```
-parallel-transcoder.mcpb (ZIP archive)
-├── manifest.json                      # MCPB manifest
-├── server/
-│   └── index.js                       # Node.js MCP server (stdio transport)
+parallel-transcoder/ (distribution archive)
+├── manifest.json                      # Project manifest
 ├── bin/
 │   ├── transcoder-coordinator         # Rust binary (coordinator)
 │   ├── transcoder-coordinator.exe     # Windows version
@@ -169,7 +167,6 @@ parallel-transcoder.mcpb (ZIP archive)
 │   ├── libswscale.so.60
 │   └── ... (macOS .dylib, Windows .dll variants)
 ├── node_modules/                      # Node.js dependencies
-│   └── @modelcontextprotocol/sdk/
 ├── package.json
 ├── icon.png
 └── README.md
@@ -191,12 +188,7 @@ parallel-transcoder.mcpb (ZIP archive)
   "server": {
     "type": "node",
     "entry_point": "server/index.js",
-    "mcp_config": {
-      "command": "node",
-      "args": [
-        "${__dirname}/server/index.js"
-      ],
-      "env": {
+    "env": {
         "TRANSCODER_BIN": "${__dirname}/bin",
         "FFMPEG_LIB_PATH": "${__dirname}/lib"
       },
@@ -217,7 +209,6 @@ parallel-transcoder.mcpb (ZIP archive)
           }
         }
       }
-    }
   },
   "tools": [
     {
@@ -272,7 +263,7 @@ parallel-transcoder.mcpb (ZIP archive)
   },
   "compatibility": {
     "platforms": ["darwin", "win32", "linux"],
-    "claude_desktop": ">=0.10.0"
+    "node": ">=16.0.0"
   },
   "keywords": ["video", "transcoding", "ffmpeg", "parallel", "encoding"],
   "license": "MIT"
@@ -290,7 +281,7 @@ parallel-transcoder.mcpb (ZIP archive)
 - Initialize Rust workspace with two crates:
   - `transcoder-coordinator`: Main coordination binary
   - `transcoder-worker`: Worker process binary
-- Initialize Node.js package for MCP server
+- Initialize Node.js package for web server
 - Set up Git repository
 
 **1.2 Add Dependencies**
@@ -389,7 +380,7 @@ pub fn create_segments(
 - Spawn worker processes (one per segment)
 - Collect results from workers
 - Generate HLS playlist or reassemble MP4
-- Report progress to MCP server via JSON output
+- Report progress to web server via JSON output
 
 **Key Flow:**
 ```rust
@@ -530,113 +521,16 @@ pub fn calculate_complexity(buffer: &VecDeque<Frame>) -> f32 {
 }
 ```
 
-### Phase 4: Node.js MCP Server
+### Phase 4: Node.js Web Server
 
-**4.1 MCP Server Implementation** (`server/index.js`)
+**4.1 Web Server Implementation** (`web/server.js`)
 
 **Responsibilities:**
-- Implement MCP protocol (stdio transport)
-- Register tool handlers
+- Implement REST API endpoints
+- Handle file uploads
 - Spawn Rust coordinator process
-- Stream progress back to Claude
+- Stream progress back via WebSocket
 - Handle errors gracefully
-
-**Core Implementation:**
-```javascript
-#!/usr/bin/env node
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  ListToolsRequestSchema,
-  CallToolRequestSchema
-} from "@modelcontextprotocol/sdk/types.js";
-import { spawn } from "child_process";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const COORDINATOR_BIN = path.join(__dirname, "../bin/transcoder-coordinator");
-
-// Create server
-const server = new Server(
-  {
-    name: "parallel-video-transcoder",
-    version: "1.0.0",
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
-);
-
-// Register tool: transcode_video
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
-  if (name === "transcode_video") {
-    return await transcodeVideo(args);
-  } else if (name === "analyze_video") {
-    return await analyzeVideo(args);
-  }
-
-  throw new Error(`Unknown tool: ${name}`);
-});
-
-async function transcodeVideo(args) {
-  const {
-    input_path,
-    output_path,
-    max_workers = 0,
-    segment_duration = 10,
-    lookahead_frames = 40,
-    output_format = "hls"
-  } = args;
-
-  // Spawn coordinator process
-  const proc = spawn(COORDINATOR_BIN, [
-    "--input", input_path,
-    "--output", output_path,
-    "--workers", max_workers.toString(),
-    "--segment-duration", segment_duration.toString(),
-    "--lookahead", lookahead_frames.toString(),
-    "--format", output_format
-  ]);
-
-  let stdout = "";
-  let stderr = "";
-
-  proc.stdout.on("data", (data) => {
-    stdout += data.toString();
-  });
-
-  proc.stderr.on("data", (data) => {
-    stderr += data.toString();
-  });
-
-  return new Promise((resolve, reject) => {
-    proc.on("close", (code) => {
-      if (code === 0) {
-        resolve({
-          content: [
-            {
-              type: "text",
-              text: `Transcoding completed successfully!\n\nOutput: ${output_path}\n\n${stdout}`
-            }
-          ]
-        });
-      } else {
-        reject(new Error(`Transcoding failed with code ${code}: ${stderr}`));
-      }
-    });
-  });
-}
-
-// Start server
-const transport = new StdioServerTransport();
-await server.connect(transport);
-console.error("Parallel Video Transcoder MCP Server running...");
-```
 
 ### Phase 5: Build System & Bundling
 
@@ -684,7 +578,7 @@ cargo build --release --target x86_64-pc-windows-gnu
 cargo build --release --target x86_64-unknown-linux-gnu
 ```
 
-**5.3 MCPB Packaging**
+**5.3 Packaging**
 
 ```bash
 #!/bin/bash
@@ -696,10 +590,7 @@ npm install --production
 # Build Rust binaries
 ./build.sh
 
-# Create MCPB bundle
-mcpb pack . parallel-transcoder.mcpb
-
-echo "Bundle created: parallel-transcoder.mcpb"
+echo "Build complete!"
 ```
 
 ### Phase 6: Testing & Validation
@@ -768,14 +659,10 @@ time ./bin/transcoder-coordinator --input input.mp4 --output output.mp4 --worker
 - `/Volumes/FastDisk3TB/muni/Developer/parallel-transcoder/worker/src/main.rs`
 - `/Volumes/FastDisk3TB/muni/Developer/parallel-transcoder/worker/src/lookahead.rs`
 
-### Node.js MCP Server
-- `/Volumes/FastDisk3TB/muni/Developer/parallel-transcoder/server/index.js`
+### Node.js Web Server
+- `/Volumes/FastDisk3TB/muni/Developer/parallel-transcoder/web/server.js`
+- `/Volumes/FastDisk3TB/muni/Developer/parallel-transcoder/web/public/index.html`
 - `/Volumes/FastDisk3TB/muni/Developer/parallel-transcoder/package.json`
-
-### MCPB Bundle
-- `/Volumes/FastDisk3TB/muni/Developer/parallel-transcoder/manifest.json`
-- `/Volumes/FastDisk3TB/muni/Developer/parallel-transcoder/README.md`
-- `/Volumes/FastDisk3TB/muni/Developer/parallel-transcoder/icon.png`
 
 ### Build Scripts
 - `/Volumes/FastDisk3TB/muni/Developer/parallel-transcoder/build.sh`
@@ -786,22 +673,25 @@ time ./bin/transcoder-coordinator --input input.mp4 --output output.mp4 --worker
 ## Verification Steps
 
 ### End-to-End Test
-1. **Build the bundle**: `./package.sh`
-2. **Install in Claude Desktop**: Open `parallel-transcoder.mcpb`
-3. **Test transcoding**: Ask Claude to transcode a test video
+1. **Build the project**: `./build.sh && npm install`
+2. **Start the server**: `npm run web`
+3. **Test transcoding**: Upload a video via the web UI at http://localhost:3000
 4. **Verify output**:
    - HLS playlist loads correctly
    - Video plays in browser/VLC
    - Quality is acceptable
    - Processing was faster than sequential
 
-### MCP Tool Testing
+### API Testing
 ```bash
-# Test MCP server standalone
-node server/index.js
+# Start the web server
+npm run web
 
-# Send test request (in another terminal)
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"analyze_video","arguments":{"input_path":"/path/to/test.mp4"}}}' | node server/index.js
+# Test API health endpoint
+curl http://localhost:3000/api/health
+
+# Upload and transcode a test video
+curl -X POST http://localhost:3000/api/upload -F "video=@test.mp4"
 ```
 
 ---
@@ -825,22 +715,21 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"analyze_vi
 
 ## Summary
 
-This plan outlines a production-ready parallel video transcoding MCPB bundle that:
+This plan outlines a production-ready parallel video transcoding system that:
 
 1. ✅ Uses **Rust + FFmpeg bindings** for high performance
 2. ✅ Implements **keyframe-aligned segmentation** for clean parallel processing
 3. ✅ Applies **look-ahead optimization** (scene detection, complexity analysis)
 4. ✅ Coordinates **multiple worker processes** via a supervisor pattern
 5. ✅ Outputs **HLS format** for simple reassembly
-6. ✅ Follows **MCPB specification** for bundling and distribution
-7. ✅ Provides **MCP tools** for Claude to control transcoding
+6. ✅ Provides a **REST API and Web UI** for controlling transcoding
 
 **Expected Performance**: 4-8x speedup on multi-core machines with minimal quality loss.
 
 **Timeline Estimate**:
 - Phase 1-2: 2-3 days (setup, coordinator)
 - Phase 3: 2 days (worker implementation)
-- Phase 4: 1 day (MCP server)
+- Phase 4: 1 day (web server)
 - Phase 5: 1 day (build system)
 - Phase 6: 1-2 days (testing)
 - **Total**: ~7-10 days of development time

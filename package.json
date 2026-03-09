@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "description": "Massively parallel video transcoding with look-ahead optimization",
   "type": "module",
-  "main": "server/index.js",
+  "main": "web/server.js",
   "scripts": {
-    "start": "node server/index.js",
+    "start": "node web/server.js",
     "web": "node web/server.js",
     "web:stop": "kill $(cat web/.web.pid) 2>/dev/null && echo 'Server stopped.' || echo 'Server not running.'",
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -16,13 +16,12 @@
     "ffmpeg",
     "parallel",
     "encoding",
-    "mcp",
-    "mcpb"
+    "cluster",
+    "distributed"
   ],
   "author": "Muni Bajpai",
-  "license": "MIT",
+  "license": "LGPL-2.0",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
     "express": "^4.21.0",
     "multer": "^1.4.5-lts.1",
     "ws": "^8.18.0"

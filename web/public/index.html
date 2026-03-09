@@ -1388,9 +1388,24 @@ body::before {
 
           <div class="field" id="grpEncoder">
             <label class="field-label" for="optEncoder">Encoder</label>
-            <select id="optEncoder">
-              <option value="libx264" selected>libx264</option>
-              <option value="h264_videotoolbox">VideoToolbox</option>
+            <select id="optEncoder" onchange="onEncoderChange()">
+              <optgroup label="H.264 / AVC">
+                <option value="libx264" selected>libx264 (CPU)</option>
+                <option value="h264_videotoolbox" class="enc-macos">H.264 VideoToolbox (macOS GPU)</option>
+                <option value="h264_nvenc" class="enc-linux">H.264 NVENC (NVIDIA GPU)</option>
+                <option value="h264_vaapi" class="enc-linux">H.264 VAAPI (Intel/AMD GPU)</option>
+              </optgroup>
+              <optgroup label="H.265 / HEVC">
+                <option value="libx265">libx265 (CPU)</option>
+                <option value="hevc_videotoolbox" class="enc-macos">HEVC VideoToolbox (macOS GPU)</option>
+                <option value="hevc_nvenc" class="enc-linux">HEVC NVENC (NVIDIA GPU)</option>
+                <option value="hevc_vaapi" class="enc-linux">HEVC VAAPI (Intel/AMD GPU)</option>
+              </optgroup>
+              <optgroup label="AV1">
+                <option value="libsvtav1">SVT-AV1 (CPU, fast)</option>
+                <option value="libaom-av1">libaom-av1 (CPU, slow/quality)</option>
+                <option value="av1_nvenc" class="enc-linux">AV1 NVENC (NVIDIA RTX 40+)</option>
+              </optgroup>
             </select>
           </div>
 
@@ -1411,7 +1426,8 @@ body::before {
 
           <div class="field" id="grpCrf">
             <label class="field-label" for="optCrf">CRF</label>
-            <input type="number" id="optCrf" min="0" max="51" value="23">
+            <input type="number" id="optCrf" min="0" max="63" value="23">
+            <small id="crfHint" style="color:var(--text-muted);font-size:0.75rem;margin-top:2px"></small>
           </div>
 
           <div class="field">
@@ -1673,6 +1689,58 @@ body::before {
    * ================================================================== */
 
   var VU_SEGMENTS = 30; // number of LED segments in the VU meter
+
+  /** Detect server platform and hide encoder options for wrong OS. */
+  function detectPlatformEncoders() {
+    fetch('/api/health').then(function(r) { return r.json(); }).then(function(data) {
+      var isMac = data.platform === 'darwin';
+      var isLinux = data.platform === 'linux';
+      // Hide macOS-only encoders on Linux and vice versa
+      document.querySelectorAll('.enc-macos').forEach(function(el) {
+        el.style.display = isMac ? '' : 'none';
+        el.disabled = !isMac;
+      });
+      document.querySelectorAll('.enc-linux').forEach(function(el) {
+        el.style.display = isLinux ? '' : 'none';
+        el.disabled = !isLinux;
+      });
+    }).catch(function() { /* offline — show all options */ });
+  }
+
+  /** Update UI hints when encoder changes (CRF range, preset labels, visibility). */
+  function onEncoderChange() {
+    var enc = document.getElementById('optEncoder').value;
+    var crfInput = document.getElementById('optCrf');
+    var crfHint = document.getElementById('crfHint');
+    var grpPreset = document.getElementById('grpPreset');
+    var grpCrf = document.getElementById('grpCrf');
+    var isHW = enc.includes('videotoolbox') || enc.includes('nvenc') || enc.includes('vaapi');
+
+    // Hardware encoders use bitrate, not CRF — hide CRF and preset
+    grpCrf.style.display = isHW ? 'none' : '';
+    grpPreset.style.display = isHW ? 'none' : '';
+
+    if (isHW) { crfHint.textContent = ''; return; }
+
+    // Set CRF range and hint per codec
+    if (enc === 'libx265') {
+      crfInput.max = 51;
+      if (parseInt(crfInput.value) === 23) crfInput.value = 28; // x265 default
+      crfHint.textContent = 'x265 default: 28 (0-51)';
+    } else if (enc === 'libsvtav1') {
+      crfInput.max = 63;
+      if (parseInt(crfInput.value) === 23 || parseInt(crfInput.value) === 28) crfInput.value = 30;
+      crfHint.textContent = 'SVT-AV1 default: 30 (0-63)';
+    } else if (enc === 'libaom-av1') {
+      crfInput.max = 63;
+      if (parseInt(crfInput.value) === 23 || parseInt(crfInput.value) === 28) crfInput.value = 30;
+      crfHint.textContent = 'libaom default: 30 (0-63)';
+    } else {
+      crfInput.max = 51;
+      if (parseInt(crfInput.value) === 28 || parseInt(crfInput.value) === 30) crfInput.value = 23;
+      crfHint.textContent = 'x264 default: 23 (0-51)';
+    }
+  }
 
   var UI = {
     els: {},
@@ -2123,9 +2191,10 @@ body::before {
    * ================================================================== */
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', App.init);
+    document.addEventListener('DOMContentLoaded', function() { App.init(); detectPlatformEncoders(); });
   } else {
     App.init();
+    detectPlatformEncoders();
   }
 
 })();

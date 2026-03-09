@@ -1,6 +1,7 @@
 import express from "express";
 import multer from "multer";
 import { WebSocketServer } from "ws";
+import WebSocket from "ws";
 import { spawn } from "child_process";
 import crypto from "crypto";
 import path from "path";
@@ -16,7 +17,11 @@ const UPLOAD_DIR = path.join(__dirname, "uploads");
 const OUTPUT_DIR = path.join(__dirname, "outputs");
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
+const CLUSTER_MASTER = process.env.CLUSTER_MASTER || "localhost:9900";
 const MAX_LOG_LINES = 200;
+
+// Platform-aware library path variable
+const LIB_PATH_KEY = process.platform === "darwin" ? "DYLD_LIBRARY_PATH" : "LD_LIBRARY_PATH";
 const UPLOAD_LIMIT = 10 * 1024 * 1024 * 1024; // 10 GB
 const PID_FILE = path.join(__dirname, ".web.pid");
 
@@ -98,6 +103,8 @@ app.get("/api/health", (_req, res) => {
     status: "ok",
     version: "1.0.0",
     uptime: Math.floor(process.uptime()),
+    platform: process.platform,
+    arch: process.arch,
     jobs: {
       total: jobs.size,
       running: [...jobs.values()].filter(j => j.status === "running").length,
@@ -192,7 +199,7 @@ app.post("/api/transcode", async (req, res) => {
   jobs.set(jobId, job);
 
   const child = spawn(COORDINATOR_BIN, args, {
-    env: { ...process.env, DYLD_LIBRARY_PATH: LIB_DIR },
+    env: { ...process.env, [LIB_PATH_KEY]: LIB_DIR },
     stdio: ["ignore", "pipe", "pipe"],
   });
   job.process = child;
@@ -364,6 +371,66 @@ app.get("/api/download/:jobId/:filename", (req, res) => {
   }
 
   res.download(filePath, filename);
+});
+
+// ---------------------------------------------------------------------------
+// Cluster management endpoints
+// ---------------------------------------------------------------------------
+
+// Cluster status
+app.get("/api/cluster/status", async (req, res) => {
+  try {
+    const status = await queryCluster("StatusRequest");
+    res.json(status);
+  } catch (err) {
+    res.status(503).json({ error: `Cluster unreachable: ${err.message}` });
+  }
+});
+
+// List cluster nodes
+app.get("/api/cluster/nodes", async (req, res) => {
+  try {
+    const status = await queryCluster("StatusRequest");
+    res.json(status.nodes || []);
+  } catch (err) {
+    res.status(503).json({ error: `Cluster unreachable: ${err.message}` });
+  }
+});
+
+// Submit transcode job to the cluster
+app.post("/api/cluster/transcode", async (req, res) => {
+  const {
+    uploadId,
+    format = "hls",
+    crf = 23,
+    preset = "medium",
+    encoder = "libx264",
+  } = req.body;
+
+  if (!uploadId) {
+    return res.status(400).json({ error: "uploadId is required" });
+  }
+
+  const inputPath = path.join(UPLOAD_DIR, path.basename(uploadId));
+  if (!fs.existsSync(inputPath)) {
+    return res.status(404).json({ error: "Uploaded file not found" });
+  }
+
+  const jobId = crypto.randomUUID();
+
+  try {
+    const result = await submitClusterJob({
+      jobId,
+      inputPath,
+      format,
+      crf,
+      preset,
+      encoder,
+    });
+    res.json({ jobId, status: "submitted", clusterId: result.jobId });
+  } catch (err) {
+    res.status(500).json({ error: `Cluster submission failed: ${err.message}` });
+  }
 });
 
 // Global error handler
@@ -556,11 +623,107 @@ function listOutputFiles(dir) {
   }
 }
 
+/** Query the cluster master via WebSocket and return the response. */
+function queryCluster(requestType, timeout = 5000) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://${CLUSTER_MASTER}`);
+
+    const timer = setTimeout(() => {
+      ws.close();
+      reject(new Error("Cluster query timed out"));
+    }, timeout);
+
+    ws.on("open", () => {
+      // Send a StatusRequest message (OpCode 50 = StatusRequest)
+      ws.send(JSON.stringify({ op: 50, d: {} }));
+    });
+
+    ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.op === 51) {  // OpCode 51 = StatusResponse
+          clearTimeout(timer);
+          ws.close();
+          resolve(msg.d);
+        }
+      } catch {
+        // ignore malformed messages
+      }
+    });
+
+    ws.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+
+    ws.on("close", () => {
+      clearTimeout(timer);
+    });
+  });
+}
+
+/** Submit a transcode job to the cluster master. */
+function submitClusterJob({ jobId, inputPath, format, crf, preset, encoder }) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://${CLUSTER_MASTER}`);
+
+    const timer = setTimeout(() => {
+      ws.close();
+      reject(new Error("Cluster job submission timed out"));
+    }, 10000);
+
+    ws.on("open", () => {
+      const fileSize = fs.statSync(inputPath).size;
+      // Send JobSubmit (OpCode 30)
+      ws.send(JSON.stringify({
+        op: 30,
+        d: {
+          job_id: jobId,
+          input_filename: inputPath,
+          input_size_bytes: fileSize,
+          config: {
+            crf: Number(crf),
+            preset,
+            encoder,
+            format,
+            fast_mode: true,
+            hw_decode: false,
+          },
+          srt_input_url: null,
+        },
+      }));
+    });
+
+    ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.op === 31) {  // OpCode 31 = JobAccepted
+          clearTimeout(timer);
+          // Keep connection open for progress monitoring
+          // but return immediately to the caller
+          resolve({ jobId: msg.d.job_id, totalSegments: msg.d.total_segments });
+        } else if (msg.op === 255) {  // OpCode 255 = Error
+          clearTimeout(timer);
+          ws.close();
+          reject(new Error(msg.d.message || "Cluster error"));
+        }
+      } catch {
+        // ignore malformed messages
+      }
+    });
+
+    ws.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
 /** Run the coordinator synchronously and return stdout/stderr. */
 function runCoordinatorSync(args) {
   return new Promise((resolve, reject) => {
     const child = spawn(COORDINATOR_BIN, args, {
-      env: { ...process.env, DYLD_LIBRARY_PATH: LIB_DIR },
+      env: { ...process.env, [LIB_PATH_KEY]: LIB_DIR },
       stdio: ["ignore", "pipe", "pipe"],
     });
 

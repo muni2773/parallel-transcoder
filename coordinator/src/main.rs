@@ -44,7 +44,7 @@ struct Args {
     #[arg(short, long, default_value = "medium")]
     preset: String,
 
-    /// Encoder to use (libx264 or h264_videotoolbox)
+    /// Encoder to use (libx264, libx265, libsvtav1, libaom-av1, h264_videotoolbox, hevc_videotoolbox)
     #[arg(short = 'E', long, default_value = "libx264")]
     encoder: String,
 
@@ -75,6 +75,14 @@ struct Args {
     /// Smart report: dry-run analysis showing per-segment copy/encode decisions as JSON (implies --smart)
     #[arg(long)]
     smart_report: bool,
+
+    /// Enable distributed cluster mode
+    #[arg(long)]
+    cluster: bool,
+
+    /// Cluster master address to submit job to (e.g., 192.168.1.10:9900)
+    #[arg(long)]
+    cluster_master: Option<String>,
 }
 
 /// Segment descriptor sent to the worker process (matches worker's SegmentDescriptor).
@@ -229,6 +237,11 @@ async fn main() -> Result<()> {
             "  Segment {}: frames {}-{} ({:.2}s-{:.2}s) complexity={:.3}",
             seg.id, seg.start_frame, seg.end_frame, seg.start_timestamp, seg.end_timestamp, seg.complexity_estimate
         );
+    }
+
+    // Distributed cluster mode: submit job to cluster master and monitor remotely
+    if args.cluster {
+        return run_cluster_mode(&args, &input_path, &metadata, &segments).await;
     }
 
     // Prepare output directory
@@ -522,7 +535,7 @@ async fn main() -> Result<()> {
             .collect();
 
         let use_hw_decode = fast
-            && (args.encoder == "h264_videotoolbox" || args.encoder == "videotoolbox");
+            && (args.encoder.contains("videotoolbox") || args.encoder.contains("nvenc") || args.encoder.contains("vaapi"));
 
         let results: Vec<Result<WorkerResult>> = stream::iter(encode_descriptors.into_iter().enumerate())
             .map(|(worker_id, (seg_idx, desc))| {
@@ -1030,10 +1043,10 @@ async fn presplit_segments(
 /// Map encoder name to the codec name that ffprobe reports.
 fn encoder_to_codec(encoder: &str) -> &str {
     match encoder {
-        "libx264" | "h264_videotoolbox" | "videotoolbox" => "h264",
-        "libx265" | "hevc_videotoolbox" => "hevc",
+        "libx264" | "h264_videotoolbox" | "videotoolbox" | "h264_nvenc" | "h264_vaapi" => "h264",
+        "libx265" | "hevc_videotoolbox" | "hevc_nvenc" | "hevc_vaapi" => "hevc",
         "libvpx-vp9" => "vp9",
-        "libaom-av1" | "libsvtav1" => "av1",
+        "libaom-av1" | "libsvtav1" | "av1_nvenc" => "av1",
         other => other,
     }
 }
@@ -1060,8 +1073,23 @@ fn estimate_target_bitrate(width: u32, height: u32, crf: u32, encoder: &str) -> 
     // CRF 23 is our baseline
     let crf_factor = 1.12f64.powi(23i32 - crf as i32);
 
-    // VideoToolbox typically produces higher bitrate than libx264 at equivalent quality
-    let encoder_factor = if encoder.contains("videotoolbox") { 2.0 } else { 1.0 };
+    // Encoder efficiency factors relative to libx264 baseline:
+    // - H.265/HEVC achieves ~50% bitrate at equivalent quality
+    // - AV1 achieves ~30-40% bitrate at equivalent quality
+    // - VideoToolbox produces higher bitrate than software encoders
+    let encoder_factor = match encoder {
+        e if e.contains("videotoolbox") && e.contains("hevc") => 1.0,
+        e if e.contains("videotoolbox") => 2.0,
+        e if e.contains("nvenc") && (e.contains("hevc") || e.contains("av1")) => 0.7,
+        e if e.contains("nvenc") => 1.5,
+        e if e.contains("vaapi") && e.contains("hevc") => 0.8,
+        e if e.contains("vaapi") => 1.5,
+        "libx265" | "hevc_nvenc" | "hevc_vaapi" => 0.5,
+        "libsvtav1" => 0.4,
+        "libaom-av1" => 0.35,
+        "av1_nvenc" => 0.5,
+        _ => 1.0,
+    };
 
     base_bitrate * crf_factor * encoder_factor
 }
@@ -1245,4 +1273,106 @@ fn find_worker_binary() -> Result<PathBuf> {
         "Could not find '{}' binary. Build the workspace first with `cargo build`.",
         worker_name
     )
+}
+
+/// Submit a transcoding job to the cluster master and monitor progress.
+async fn run_cluster_mode(
+    args: &Args,
+    input_path: &Path,
+    metadata: &analyzer::VideoMetadata,
+    _segments: &[segmenter::Segment],
+) -> Result<()> {
+    use transcoder_cluster::protocol::*;
+
+    let master_addr = args.cluster_master.as_deref()
+        .unwrap_or("127.0.0.1:9900");
+
+    info!("Cluster mode: connecting to master at {}", master_addr);
+
+    // Connect via WebSocket
+    let ws_url = format!("ws://{}", master_addr);
+    let (mut ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await
+        .context("Failed to connect to cluster master")?;
+
+    use futures::SinkExt;
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite;
+
+    // Submit job
+    let job_id = uuid::Uuid::new_v4();
+    let input_size = std::fs::metadata(input_path)?.len();
+
+    let submit = JobSubmitData {
+        job_id,
+        input_filename: input_path.to_string_lossy().to_string(),
+        input_size_bytes: input_size,
+        config: EncodingConfig {
+            crf: args.crf,
+            preset: args.preset.clone(),
+            encoder: args.encoder.clone(),
+            format: args.format.clone(),
+            fast_mode: args.fast,
+            hw_decode: false,
+        },
+        srt_input_url: None,
+    };
+
+    let msg = Message::new(OpCode::JobSubmit, &submit)?;
+    let json = serde_json::to_string(&msg)?;
+    ws_stream.send(tungstenite::Message::Text(json.into())).await?;
+
+    info!("Job {} submitted to cluster, waiting for completion...", job_id);
+
+    // Wait for responses
+    while let Some(result) = ws_stream.next().await {
+        match result {
+            Ok(tungstenite::Message::Text(text)) => {
+                if let Ok(msg) = serde_json::from_str::<Message>(&text) {
+                    match msg.op {
+                        OpCode::JobAccepted => {
+                            if let Ok(data) = msg.parse_data::<JobAcceptedData>() {
+                                info!("Job accepted: {} segments to process", data.total_segments);
+                            }
+                        }
+                        OpCode::JobProgress => {
+                            if let Ok(data) = msg.parse_data::<JobProgressData>() {
+                                info!(
+                                    "Progress: {}/{} segments ({} failed) — {}",
+                                    data.completed_segments, data.total_segments,
+                                    data.failed_segments, data.phase
+                                );
+                            }
+                        }
+                        OpCode::JobComplete => {
+                            info!("Job completed successfully!");
+                            break;
+                        }
+                        OpCode::JobFailed => {
+                            let err_msg = msg.d.get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown error");
+                            anyhow::bail!("Job failed: {}", err_msg);
+                        }
+                        OpCode::Error => {
+                            if let Ok(data) = msg.parse_data::<ErrorData>() {
+                                anyhow::bail!("Cluster error: {}", data.message);
+                            }
+                        }
+                        _ => {
+                            debug!("Received {:?}", msg.op);
+                        }
+                    }
+                }
+            }
+            Ok(tungstenite::Message::Close(_)) => {
+                anyhow::bail!("Connection to cluster master closed unexpectedly");
+            }
+            Err(e) => {
+                anyhow::bail!("WebSocket error: {}", e);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }

@@ -1,183 +1,185 @@
-# Parallel Video Transcoder MCPB
+# Parallel Video Transcoder
 
-A massively parallel video transcoding MCP Bundle with intelligent look-ahead optimization.
+A distributed, multi-node video transcoding engine with intelligent segment allocation, multi-codec support, and hardware-accelerated encoding. Built with Rust for performance and Node.js for the web interface.
 
-## Overview
+## Key Features
 
-This MCPB bundle enables users to transcode videos significantly faster by:
-
-- **Parallel Processing**: Splitting video into segments and processing them simultaneously across multiple workers
-- **Look-Ahead Optimization**: Analyzing future frames to avoid unnecessary compute (scene change detection, complexity analysis)
-- **Rust + FFmpeg**: Using high-performance Rust with FFmpeg bindings for optimal transcoding
+- **Distributed Cluster** — Bully-algorithm leader election, WebSocket control plane (OBS-style OpCode protocol), SRT data transport between nodes
+- **Multi-Codec** — H.264, H.265/HEVC, and AV1 with CPU and GPU encoders
+- **Hardware Acceleration** — VideoToolbox (macOS), NVENC (NVIDIA), VAAPI (Intel/AMD on Linux)
+- **Smart Mode** — Complexity-aware encoding that skips segments below a tolerance threshold
+- **Parallel Workers** — Keyframe-aligned segmentation with complexity-balanced distribution across cores and machines
+- **Web UI** — Dark-themed SPA with drag-and-drop upload, real-time WebSocket progress, and output downloads
+- **REST API** — Full programmatic control with optional API key authentication
+- **Cross-Platform** — macOS (ARM64/x86_64) and Linux (RHEL, Rocky, Fedora, CentOS)
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                   MCP Server (Node.js)                   │
-│  - Receives video transcoding requests from Claude       │
-│  - Coordinates Rust transcoding engine                   │
-│  - Returns progress and results via MCP protocol         │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                     Cluster Layer (Rust)                      │
+│  transcoder-node daemons on each machine                     │
+│  - Bully election → one master, N workers                    │
+│  - WebSocket control plane (OBS OpCode protocol)             │
+│  - SRT data plane for segment transfer                       │
+│  - Complexity-aware scheduler distributes segments           │
+└──────────────────────────────────────────────────────────────┘
+        ↕ WebSocket (OpCodes)              ↕ SRT (segments)
+┌──────────────────────────────────────────────────────────────┐
+│                    Coordinator (Rust)                         │
+│  - Pre-analyzes video (GOPs, keyframes, scene changes)       │
+│  - Splits at keyframe boundaries                             │
+│  - Spawns local worker processes or delegates to cluster     │
+│  - Reassembles HLS / MP4 output                             │
+└──────────────────────────────────────────────────────────────┘
                             ↓
-┌─────────────────────────────────────────────────────────┐
-│            Coordinator (Rust Binary)                     │
-│  - Pre-analyzes video (GOPs, keyframes, scenes)         │
-│  - Splits video into segments at keyframe boundaries    │
-│  - Spawns worker processes                              │
-│  - Collects and reassembles results                     │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                      Workers (Rust)                           │
+│  - Decode assigned segment                                   │
+│  - Encode with H.264 / H.265 / AV1 (CPU or GPU)             │
+│  - 10-bit pipeline for HEVC and AV1 when source is 10-bit   │
+│  - Return encoded segment + metadata                         │
+└──────────────────────────────────────────────────────────────┘
                             ↓
-┌─────────────────────────────────────────────────────────┐
-│              Worker Processes (Rust)                     │
-│  - Decode assigned video segment                        │
-│  - Look-ahead frame analysis                            │
-│  - Transcode with optimized parameters                  │
-│  - Return encoded segment + metadata                    │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                   Web Server (Node.js)                        │
+│  - Express REST API + WebSocket live updates                 │
+│  - Dark-themed SPA frontend                                  │
+│  - Cluster management endpoints                              │
+│  - Optional API key authentication                           │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-## Features
+## Supported Encoders
 
-- ✅ Keyframe-aligned segmentation for clean parallel processing
-- ✅ Scene change detection with look-ahead analysis
-- ✅ Complexity-based bitrate allocation
-- ✅ HLS output format for seamless reassembly
-- ✅ MCP protocol integration for Claude Desktop
-- ✅ Cross-platform support (macOS, Windows, Linux)
-
-## Performance
-
-Expected performance gains:
-- **4-8x speedup** on 8-core machines
-- Minimal quality loss (< 0.5 dB PSNR difference)
-- Optimized for multi-core CPUs
+| Codec | CPU | macOS GPU | Linux GPU (NVIDIA) | Linux GPU (Intel/AMD) |
+|-------|-----|-----------|--------------------|-----------------------|
+| H.264 | libx264 | h264_videotoolbox | h264_nvenc | h264_vaapi |
+| H.265 | libx265 | hevc_videotoolbox | hevc_nvenc | hevc_vaapi |
+| AV1   | libsvtav1, libaom-av1 | — | av1_nvenc | — |
 
 ## Project Structure
 
 ```
 parallel-transcoder/
-├── coordinator/          # Rust coordinator binary
+├── cluster/             # Distributed cluster system (Rust)
 │   ├── src/
-│   │   ├── main.rs      # Main coordinator logic
-│   │   ├── analyzer.rs  # Video analysis module
-│   │   └── segmenter.rs # Segmentation logic
+│   │   ├── main.rs      # transcoder-node daemon
+│   │   ├── lib.rs       # Library re-exports
+│   │   ├── protocol.rs  # OBS-style OpCode message protocol
+│   │   ├── transport.rs # WebSocket transport layer
+│   │   ├── srt.rs       # SRT data plane (FFmpeg-based)
+│   │   ├── election.rs  # Bully algorithm leader election
+│   │   ├── node.rs      # Node manager, health monitoring
+│   │   └── scheduler.rs # Complexity-aware segment scheduler
 │   └── Cargo.toml
-├── worker/              # Rust worker binary
+├── coordinator/         # Local coordinator binary (Rust)
 │   ├── src/
-│   │   └── main.rs      # Worker process logic
+│   │   ├── main.rs      # CLI, orchestration, cluster mode
+│   │   ├── analyzer.rs  # Video analysis (keyframes, scenes)
+│   │   └── segmenter.rs # Keyframe-aligned segmentation
 │   └── Cargo.toml
-├── web/                 # Web server + API
-│   ├── server.js        # Express + WebSocket API server
+├── worker/              # Worker binary (Rust)
+│   ├── src/
+│   │   └── main.rs      # Multi-codec encoding engine
+│   └── Cargo.toml
+├── web/                 # Web server + UI
+│   ├── server.js        # Express + WebSocket + cluster API
 │   └── public/
-│       └── index.html   # Single-file SPA frontend
-├── server/              # Node.js MCP server
-│   └── index.js         # MCP protocol implementation
+│       └── index.html   # Dark-themed SPA
 ├── docs/                # Documentation
-│   ├── PLAN.md          # Detailed implementation plan
+│   ├── PLAN.md          # Implementation plan
 │   └── RESEARCH.md      # Research findings
 ├── API.md               # REST & WebSocket API reference
-├── manifest.json        # MCPB manifest
-├── package.json         # Node.js dependencies
-└── Cargo.toml          # Rust workspace manifest
+├── build.sh             # Cross-platform build script
+├── Cargo.toml           # Rust workspace manifest
+└── package.json         # Node.js dependencies
 ```
 
-## Development Setup
+## Quick Start
 
 ### Prerequisites
 
-- Rust (latest stable)
-- Node.js (v16+)
-- FFmpeg development libraries
-- MCPB CLI tool
+- **Rust** (latest stable): `rustup update`
+- **FFmpeg** development libraries
+- **Node.js** v16+
 
-### Build Instructions
+**macOS:**
+```bash
+brew install ffmpeg
+```
+
+**RHEL / Rocky / Fedora:**
+```bash
+# Enable RPM Fusion for full FFmpeg
+sudo dnf install ffmpeg-devel
+```
+
+### Build & Run
 
 ```bash
-# Install dependencies
-npm install
-
-# Build Rust binaries
-cargo build --release
-
-# Run build script
+# Build all Rust binaries
 ./build.sh
 
-# Package as MCPB bundle
-./package.sh
-```
+# Install Node.js dependencies
+npm install
 
-## Usage
-
-### REST API
-
-The transcoder exposes a full REST API and WebSocket interface for programmatic access:
-
-```bash
-# Start the API server
+# Start the web server
 npm run web
-
-# Upload a video
-curl -X POST http://localhost:3000/api/upload -F "video=@input.mp4"
-
-# Start transcoding
-curl -X POST http://localhost:3000/api/transcode \
-  -H "Content-Type: application/json" \
-  -d '{"uploadId": "input_1709654400000.mp4", "format": "mp4", "crf": 20}'
-
-# Check job status
-curl http://localhost:3000/api/jobs/<jobId>
-
-# Download output
-curl -O http://localhost:3000/api/download/<jobId>/output.mp4
+# → Open http://localhost:3000
 ```
 
-See **[API.md](API.md)** for the complete API reference with all endpoints, WebSocket protocol, authentication, and code examples in curl, JavaScript, and Python.
-
-### Web UI
-
-A browser-based interface is available at `http://localhost:3000` when the server is running. It provides drag-and-drop upload, real-time progress via WebSocket, and output file downloads.
-
-### As MCPB Bundle
-
-1. Build the bundle: `./package.sh`
-2. Install in Claude Desktop: Open `parallel-transcoder.mcpb`
-3. Use via Claude: "Transcode this video to HLS format"
-
-### Standalone CLI
+### CLI Usage
 
 ```bash
-# Transcode with parallel workers
+# Basic transcode (H.264, 8 workers)
 ./bin/transcoder-coordinator \
-  --input input.mp4 \
-  --output output/ \
-  --workers 8 \
-  --format hls \
-  --crf 23 \
-  --preset medium \
-  --encoder libx264
+  --input video.mp4 --output out/ \
+  --workers 8 --format mp4 --encoder libx264
 
-# Smart mode (skip segments that don't need re-encoding)
+# H.265 with hardware encoding (macOS)
 ./bin/transcoder-coordinator \
-  --input input.mp4 \
-  --output output/ \
+  --input video.mp4 --output out/ \
+  --encoder hevc_videotoolbox --format mp4
+
+# AV1 encoding
+./bin/transcoder-coordinator \
+  --input video.mp4 --output out/ \
+  --encoder libsvtav1 --crf 30
+
+# Smart mode (skip simple segments)
+./bin/transcoder-coordinator \
+  --input video.mp4 --output out/ \
   --smart --smart-tolerance 0.3
 
 # Analyze without encoding
 ./bin/transcoder-coordinator \
-  --input input.mp4 \
-  --output output/ \
-  --smart-report
+  --input video.mp4 --output out/ --smart-report
 ```
 
-## API
+### Cluster Mode
 
-Full REST API documentation is available in **[API.md](API.md)**.
+```bash
+# Start a node (first node becomes master via election)
+./bin/transcoder-node --listen 0.0.0.0:9000 --name node-1
+
+# Join existing cluster
+./bin/transcoder-node --listen 0.0.0.0:9001 --join 192.168.1.10:9000 --name node-2
+
+# Submit a job through the coordinator in cluster mode
+./bin/transcoder-coordinator \
+  --input video.mp4 --output out/ \
+  --cluster --cluster-master 192.168.1.10:9000
+```
+
+## REST API
+
+Full documentation: **[API.md](API.md)**
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/health` | GET | Server status and job counts |
-| `/api/upload` | POST | Upload video file (multipart) |
+| `/api/health` | GET | Server status, platform info |
+| `/api/upload` | POST | Upload video (multipart) |
 | `/api/transcode` | POST | Start transcoding job |
 | `/api/analyze` | POST | Analyze video complexity |
 | `/api/jobs` | GET | List all jobs |
@@ -186,49 +188,70 @@ Full REST API documentation is available in **[API.md](API.md)**.
 | `/api/jobs/:id/files` | GET | List output files |
 | `/api/download/:jobId/:file` | GET | Download output file |
 | `/api/jobs/:id` | DELETE | Cancel and remove job |
+| `/api/cluster/status` | GET | Cluster status |
+| `/api/cluster/nodes` | GET | List cluster nodes |
+| `/api/cluster/transcode` | POST | Submit cluster job |
 
 **WebSocket:** `ws://localhost:3000/ws` — real-time progress, logs, and completion events.
-
-**Authentication:** Optional API key via `TRANSCODER_API_KEY` env var.
 
 ## Configuration
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
 | `PORT` | `3000` | Server listen port |
-| `TRANSCODER_API_KEY` | *(none)* | API key for authentication (optional) |
+| `TRANSCODER_API_KEY` | *(none)* | API key for authentication |
 
 ### Encoding Parameters
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `format` | `hls` | Output format: `hls` or `mp4` |
-| `mode` | `normal` | Mode: `normal`, `copy`, `smart`, `smart-auto` |
-| `crf` | `23` | Quality (0-51, lower = better) |
-| `preset` | `medium` | Speed: `ultrafast` to `veryslow` |
-| `encoder` | `libx264` | Encoder: `libx264` or `h264_videotoolbox` |
-| `workers` | `0` | Worker count (0 = auto-detect) |
+| Parameter | Default | Options |
+|-----------|---------|---------|
+| `format` | `hls` | `hls`, `mp4` |
+| `mode` | `normal` | `normal`, `copy`, `smart`, `smart-auto` |
+| `crf` | `23` | 0-51 (H.264/H.265), 0-63 (AV1) |
+| `preset` | `medium` | `ultrafast` to `veryslow` |
+| `encoder` | `libx264` | See encoder table above |
+| `workers` | `0` | 0 = auto-detect CPU cores |
+
+## Benchmark Results
+
+Tested with [Big Buck Bunny](https://peach.blender.org/) (720p H.264, 10 min, 150 MB) on Apple Silicon (M-series, 8 workers, `libx264 -crf 23 -preset fast`).
+
+| Metric | Parallel Transcoder | FFmpeg Baseline |
+|--------|-------------------|-----------------|
+| **Wall time** | 152.6s | 49.1s* |
+| **CPU time** | — | 357s |
+| **Output size** | 111 MB | 119 MB |
+| **Bitrate** | 1,549 kbps | 1,678 kbps |
+| **Output frames** | 14,375 | 14,315 |
+| **Throughput** | 94.2 fps | — |
+
+*\*FFmpeg uses internal thread-level parallelism (744% CPU utilization). The parallel transcoder uses process-level segment parallelism — the advantage scales with distributed multi-node clusters where thread-level parallelism cannot reach.*
+
+**Pipeline details:**
+- Coordinator analyzed video and detected scene changes across 14,375 frames
+- Split into 61 keyframe-aligned segments with complexity balancing
+- 8 worker processes encoded segments concurrently
+- MP4 mux reassembled all segments — output fully playable, all frames decodable
 
 ## Implementation Status
 
-- [x] Project setup and planning
-- [x] Rust video analysis module
-- [x] Rust coordinator binary
-- [x] Rust worker binary
-- [x] Build system and packaging
+- [x] Rust video analysis, segmentation, and coordinator
+- [x] Multi-worker parallel encoding pipeline
+- [x] Multi-codec support (H.264, H.265, AV1)
+- [x] Hardware acceleration (VideoToolbox, NVENC, VAAPI)
+- [x] Distributed cluster with leader election
+- [x] OBS-style WebSocket control plane
+- [x] SRT data plane for segment transfer
+- [x] Complexity-aware cluster scheduler
 - [x] Web UI with real-time progress
 - [x] REST API with CORS and optional auth
-- [x] WebSocket live updates
-- [x] API documentation
+- [x] Cross-platform build system (macOS + Linux RHEL)
+- [x] Smart mode and analysis reporting
 
 ## License
 
-MIT
+This project is licensed under the [GNU Lesser General Public License v2.0](https://www.gnu.org/licenses/old-licenses/lgpl-2.0.html) (LGPL-2.0).
 
 ## Credits
 
-Built with:
-- [FFmpeg](https://ffmpeg.org/) - Video processing
-- [ffmpeg-next](https://github.com/zmwangx/rust-ffmpeg) - Rust FFmpeg bindings
-- [MCP SDK](https://github.com/anthropics/mcp) - Model Context Protocol
-- [MCPB](https://github.com/anthropics/mcpb) - MCP Bundle tooling
+Built with [FFmpeg](https://ffmpeg.org/), [ffmpeg-next](https://github.com/zmwangx/rust-ffmpeg), and [Tokio](https://tokio.rs/).

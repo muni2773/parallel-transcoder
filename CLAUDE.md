@@ -1,230 +1,146 @@
-# CLAUDE.md - Parallel Video Transcoder
+# Development Guide — Parallel Video Transcoder
 
-This file provides guidance to Claude Code when working on the Parallel Video Transcoder MCPB project.
+Development reference for working on this project.
 
 ## Project Overview
 
-A massively parallel video transcoding MCPB (MCP Bundle) with intelligent look-ahead optimization. Built with Rust for performance and Node.js for MCP server integration.
+Distributed, multi-node video transcoding engine with multi-codec support and hardware acceleration. Rust core with Node.js web interface.
 
 ## Architecture
 
-**Three-tier design:**
-1. **Node.js MCP Server** (`server/index.js`) - Handles MCP protocol, exposes tools to Claude Desktop
-2. **Rust Coordinator** (`coordinator/`) - Analyzes video, creates segments, orchestrates workers
-3. **Rust Workers** (`worker/`) - Process individual segments with look-ahead optimization
+**Four-tier design:**
+
+1. **Cluster Layer** (`cluster/`) — Distributed coordination across machines
+   - `protocol.rs` — OBS-websocket-inspired OpCode message format (`{ op, d }`)
+   - `transport.rs` — WebSocket transport (tokio-tungstenite), PeerHandle management
+   - `srt.rs` — SRT data plane via FFmpeg for segment transfer between nodes
+   - `election.rs` — Bully algorithm leader election (priority from UUID)
+   - `node.rs` — Node manager with DashMap registry, heartbeat health monitoring
+   - `scheduler.rs` — Complexity-aware segment distribution (highest-complexity-first)
+   - `main.rs` — `transcoder-node` daemon with tokio::select! event loop
+
+2. **Coordinator** (`coordinator/`) — Video analysis and orchestration
+   - `analyzer.rs` — Keyframe detection, scene changes, complexity estimation
+   - `segmenter.rs` — Keyframe-aligned segment creation
+   - `main.rs` — CLI entry point, local worker spawning, `--cluster` mode
+
+3. **Worker** (`worker/`) — Multi-codec encoding engine
+   - Supports H.264, H.265/HEVC, AV1 (CPU and GPU variants)
+   - Hardware: VideoToolbox (macOS), NVENC (NVIDIA), VAAPI (Intel/AMD)
+   - 10-bit pipeline (YUV420P10LE) for HEVC and AV1
+   - SVT-AV1 preset mapping, libaom cpu-used/tiles config
+
+4. **Web + API** (`web/`) — Express server with WebSocket
+   - REST API for upload, transcode, jobs, download
+   - Cluster endpoints: `/api/cluster/status`, `/api/cluster/nodes`, `/api/cluster/transcode`
+   - Dark-themed SPA with platform-aware encoder selection
 
 ## Key Technologies
 
-- **Rust**: Core transcoding engine (ffmpeg-next, tokio, clap)
-- **FFmpeg**: Video codec library via Rust bindings
-- **Node.js**: MCP server (stdio transport, @modelcontextprotocol/sdk)
-- **MCPB**: Bundle format for distribution
+| Layer | Stack |
+|-------|-------|
+| Cluster | Rust, tokio, tokio-tungstenite, DashMap, uuid, SRT via FFmpeg |
+| Coordinator/Worker | Rust, ffmpeg-next, tokio, clap, anyhow |
+| Web | Node.js, Express, ws, multer |
 
 ## Project Structure
 
 ```
 parallel-transcoder/
-├── coordinator/          # Rust coordinator binary
-│   ├── src/
-│   │   ├── main.rs      # Entry point, CLI, orchestration
-│   │   ├── analyzer.rs  # Video analysis (keyframes, scenes, complexity)
-│   │   └── segmenter.rs # Segment creation logic
-│   └── Cargo.toml
-├── worker/              # Rust worker binary
-│   ├── src/
-│   │   ├── main.rs      # Worker process entry point
-│   │   └── lookahead.rs # Look-ahead optimization algorithms
-│   └── Cargo.toml
-├── server/              # Node.js MCP server
-│   └── index.js         # MCP protocol implementation
-├── docs/                # Documentation
-│   ├── PLAN.md          # Complete implementation plan
-│   └── RESEARCH.md      # Video processing research
-├── manifest.json        # MCPB bundle manifest
-├── package.json         # Node.js dependencies
-├── Cargo.toml          # Rust workspace manifest
-├── build.sh            # Build script
-└── package.sh          # MCPB packaging script
+├── cluster/             # Distributed cluster (Rust crate)
+│   └── src/             # protocol, transport, srt, election, node, scheduler, main
+├── coordinator/         # Video analysis + orchestration (Rust crate)
+│   └── src/             # main, analyzer, segmenter
+├── worker/              # Encoding engine (Rust crate)
+│   └── src/             # main (multi-codec)
+├── web/                 # Web server + UI
+│   ├── server.js        # Express + WebSocket + cluster API
+│   └── public/index.html
+├── docs/                # PLAN.md, RESEARCH.md
+├── API.md               # Full API reference
+├── build.sh             # Cross-platform build
+└── Cargo.toml           # Workspace: coordinator, worker, cluster
 ```
 
-## Development Workflow
-
-### Building
+## Development Commands
 
 ```bash
-# Build Rust binaries and bundle FFmpeg libraries
+# Build everything
 ./build.sh
 
-# Test coordinator
-./bin/transcoder-coordinator --help
-
-# Test worker
-./bin/transcoder-worker --help
-```
-
-### Testing
-
-```bash
-# Run Rust tests
+# Run tests
 cargo test
 
-# Test MCP server standalone
-node server/index.js
+# Start web server
+npm run web
 
-# Send test MCP request
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node server/index.js
+# Start cluster node
+./bin/transcoder-node --listen 0.0.0.0:9000 --name node-1
+
+# Join cluster
+./bin/transcoder-node --listen 0.0.0.0:9001 --join host:9000 --name node-2
+
+# Local transcode
+./bin/transcoder-coordinator --input video.mp4 --output out/ --workers 8 --encoder libx264
+
+# Cluster transcode
+./bin/transcoder-coordinator --input video.mp4 --output out/ --cluster --cluster-master host:9000
 ```
 
-### Packaging
+## Coordinator CLI Flags
 
-```bash
-# Install Node deps and create MCPB bundle
-./package.sh
+`--input`, `--output`, `--workers`, `--segment-duration`, `--format` (hls/mp4),
+`--crf`, `--preset`, `--encoder` (`-E`), `--verbose`, `--fast`, `--copy`, `--smart`,
+`--smart-tolerance`, `--smart-auto`, `--smart-report`, `--cluster`, `--cluster-master`
 
-# Install in Claude Desktop
-open parallel-transcoder.mcpb
-```
+## Cluster Node CLI Flags
 
-## Implementation Status
+`--listen`, `--join`, `--name`, `--srt-base-port`, `--worker-binary`, `--lib-dir`, `--verbose`
 
-### ✅ Completed
-- [x] Project structure and scaffolding
-- [x] Rust workspace configuration
-- [x] Node.js MCP server scaffolding
-- [x] MCPB manifest and configuration
-- [x] Build system and packaging scripts
-- [x] Comprehensive research and planning
+## Encoder Mapping
 
-### 🚧 In Progress
-- [ ] Video analysis module (analyzer.rs)
-  - [ ] FFmpeg integration
-  - [ ] Keyframe detection
-  - [ ] Scene change detection
-  - [ ] Complexity estimation
+| Encoder | Codec | Config Notes |
+|---------|-------|-------------|
+| libx264 | H.264 | Standard x264 presets and CRF |
+| h264_videotoolbox | H.264 | macOS HW, no CRF (uses bitrate) |
+| h264_nvenc | H.264 | VBR, p5 preset |
+| h264_vaapi | H.264 | VBR, profile-aware bitrate |
+| libx265 | H.265 | Standard x265, 10-bit capable |
+| hevc_videotoolbox | H.265 | macOS HW |
+| hevc_nvenc | H.265 | VBR, p5 preset |
+| hevc_vaapi | H.265 | VBR |
+| libsvtav1 | AV1 | Mapped presets (0-12), 10-bit |
+| libaom-av1 | AV1 | cpu-used mapping, row-mt=1, tiles=2x2 |
+| av1_nvenc | AV1 | NVIDIA Lovelace+ |
 
-### 📋 TODO
-- [ ] Segmentation logic (segmenter.rs)
-- [ ] Coordinator orchestration (coordinator/main.rs)
-- [ ] Worker transcoding loop (worker/main.rs)
-- [ ] Look-ahead algorithms (lookahead.rs)
-- [ ] HLS playlist generation
-- [ ] MP4 reassembly
-- [ ] Progress reporting
-- [ ] Error handling and recovery
-- [ ] Unit tests
-- [ ] Integration tests
-- [ ] Performance benchmarks
+## Cross-Platform Notes
 
-## Key Implementation Notes
-
-### Video Segmentation Strategy
-- **MUST** split at keyframe (I-frame) boundaries
-- Use pre-analysis to identify all keyframes
-- Target segment duration (default: 10s) aligned to nearest keyframes
-- Balance segments by complexity for even workload
-
-### Look-Ahead Optimization
-1. **Scene Change Detection**: Compare frame histograms, threshold ~0.3
-2. **Complexity Analysis**: Spatial (edges, variance) + Temporal (motion, SAD)
-3. **Bitrate Allocation**: More bits for complex frames based on look-ahead
-4. **Adaptive Keyframes**: Force keyframes at scene boundaries
-
-### FFmpeg Integration
-- Use `ffmpeg-next` crate (Rust bindings to FFmpeg C library)
-- Decoder: Read frames, seek to positions
-- Encoder: Write frames with custom parameters
-- DO NOT attempt to recompile FFmpeg from C to Rust (impractical)
-
-### Output Formats
-- **HLS** (Recommended): `.m3u8` playlist + `.ts` segments, simplest reassembly
-- **MP4**: Requires complex container reassembly, frame offset rewriting
-
-## Development Guidelines
-
-### Rust Code
-- Use `anyhow::Result` for error handling
-- Implement `#[tokio::main]` for async operations
-- Add tracing/logging with `tracing` crate
-- Write unit tests in each module
-- Document public APIs with rustdoc comments
-
-### Node.js MCP Server
-- Follow MCP SDK patterns (stdio transport)
-- Return structured JSON responses
-- Handle errors gracefully
-- Log to stderr (stdout reserved for MCP protocol)
-
-### Performance Targets
-- **4-8x speedup** on 8-core machines vs sequential FFmpeg
-- **< 0.5 dB quality loss** compared to reference encoding
-- **HLS output** compatible with browsers, VLC, ffplay
-
-## Dependencies
-
-### System Requirements
-- FFmpeg (development libraries for building)
-- Rust toolchain (stable channel)
-- Node.js (v16+)
-- MCPB CLI (`npm install -g @anthropic-ai/mcpb`)
-
-### Rust Crates
-- `ffmpeg-next` - FFmpeg Rust bindings
-- `tokio` - Async runtime
-- `serde`/`serde_json` - Serialization
-- `clap` - CLI argument parsing
-- `anyhow` - Error handling
-- `tracing` - Logging
-
-### Node.js Packages
-- `@modelcontextprotocol/sdk` - MCP protocol implementation
-
-## Testing Strategy
-
-### Unit Tests
-- Keyframe detection accuracy
-- Scene change detection threshold tuning
-- Complexity calculation verification
-- Segment balancing algorithm
-
-### Integration Tests
-- End-to-end transcoding pipeline
-- HLS playlist generation and playback
-- Multi-worker coordination
-- Error recovery (invalid input, worker failures)
-
-### Benchmarks
-- Compare against `ffmpeg -i input.mp4 output.mp4`
-- Measure speedup vs # of workers
-- Profile memory usage
-- Validate quality (PSNR, SSIM metrics)
-
-## Troubleshooting
-
-### Build Issues
-- **FFmpeg not found**: Install FFmpeg dev packages
+- **Library path**: `DYLD_LIBRARY_PATH` on macOS, `LD_LIBRARY_PATH` on Linux
+- **GPU detection**:
+  - macOS: VideoToolbox (always available)
+  - Linux NVIDIA: check `/dev/nvidia0`
+  - Linux VAAPI: check `/dev/dri/renderD128`
+- **Build**: `build.sh` uses pkg-config first, then platform-specific fallback paths
+- **FFmpeg install**:
   - macOS: `brew install ffmpeg`
-  - Ubuntu: `apt-get install libavcodec-dev libavformat-dev`
-- **Rust version**: Use latest stable: `rustup update`
+  - RHEL/Rocky/Fedora: `dnf install ffmpeg-devel` (requires RPM Fusion)
 
-### Runtime Issues
-- **Segmentation artifacts**: Check keyframe alignment
-- **Quality loss**: Tune look-ahead parameters, bitrate allocation
-- **Performance**: Verify FFmpeg using hardware acceleration if available
+## Rust Guidelines
+
+- `anyhow::Result` for error handling
+- `#[tokio::main]` for async entry points
+- `tracing` for structured logging
+- Unit tests in each module (58 tests in cluster crate)
+
+## OpCode Protocol (OBS-inspired)
+
+Key OpCodes: Hello(0), Identify(1), Identified(2), ElectionStart(10), ElectionAlive(11), ElectionVictory(12), Heartbeat(20), HeartbeatAck(21), JobSubmit(30), JobAccepted(31), JobProgress(32), JobComplete(33), JobFailed(34), JobCancel(35), SegmentAssign(40), SegmentComplete(42), StatusRequest(50), StatusResponse(51), Event(60), NodeLeave(70), Error(255)
+
+Event subscription bitmask constants in `cluster::protocol::event_subs`.
 
 ## Resources
 
-- [Detailed Implementation Plan](docs/PLAN.md)
-- [MCPB Specification](https://github.com/anthropics/mcpb)
-- [FFmpeg Documentation](https://ffmpeg.org/documentation.html)
-- [ffmpeg-next Crate](https://docs.rs/ffmpeg-next/)
-- [MCP SDK](https://github.com/anthropics/mcp)
-
-## Next Steps
-
-See `docs/PLAN.md` for the complete phase-by-phase implementation roadmap.
-
-**Immediate priorities:**
-1. Implement video analysis module with FFmpeg integration
-2. Build keyframe and scene change detection
-3. Create segment descriptors aligned to keyframes
-4. Implement worker transcoding loop with look-ahead buffer
+- [API Reference](API.md)
+- [Implementation Plan](docs/PLAN.md)
+- [Research](docs/RESEARCH.md)
+- [ffmpeg-next docs](https://docs.rs/ffmpeg-next/)

@@ -46,7 +46,7 @@ struct Args {
     #[arg(short, long, default_value = "medium")]
     preset: String,
 
-    /// Encoder to use (libx264 or h264_videotoolbox)
+    /// Encoder to use (libx264, libx265, libsvtav1, libaom-av1, h264_videotoolbox, hevc_videotoolbox)
     #[arg(short, long, default_value = "libx264")]
     encoder: String,
 
@@ -232,35 +232,49 @@ fn transcode_segment(
     info!("Input: {}x{} {:?}", width, height, src_format);
 
     // --- Scaler ---
-    // Convert decoded frames to YUV420P for encoding.
+    // Convert decoded frames to target pixel format for encoding.
     // For hw decode, defer scaler init until we see the actual frame format.
-    let enc_format = Pixel::YUV420P;
+    // enc_format may be overridden below for 10-bit HEVC/AV1.
+    let mut enc_format = Pixel::YUV420P;
 
     let mut yuv_scaler: Option<ScalerContext> = if !hw_decode {
         Some(ScalerContext::get(
             src_format, width, height,
             enc_format, width, height,
             Flags::BILINEAR,
-        ).context("Failed to create YUV420P scaler")?)
+        ).context("Failed to create scaler")?)
     } else {
         None
     };
 
     // --- Set up encoder ---
-    let use_videotoolbox = args.encoder == "h264_videotoolbox" || args.encoder == "videotoolbox";
+    let is_videotoolbox = args.encoder.contains("videotoolbox");
+    let is_nvenc = args.encoder.contains("nvenc");
+    let is_vaapi = args.encoder.contains("vaapi");
+    let is_hevc = args.encoder.contains("x265") || args.encoder.contains("hevc");
+    let is_av1 = args.encoder.contains("svtav1") || args.encoder.contains("aom-av1") || args.encoder == "av1_nvenc";
 
-    let h264 = if use_videotoolbox {
-        encoder::find_by_name("h264_videotoolbox")
-            .ok_or_else(|| anyhow::anyhow!("h264_videotoolbox encoder not found — macOS only"))?
+    let video_codec = find_encoder(&args.encoder)?;
+
+    // For AV1 and HEVC, prefer YUV420P10LE when the source is 10-bit
+    let enc_format = if (is_hevc || is_av1) && matches!(src_format, Pixel::YUV420P10LE | Pixel::YUV420P10BE | Pixel::P010LE | Pixel::P010BE) {
+        Pixel::YUV420P10LE
     } else {
-        encoder::find_by_name("libx264")
-            .or_else(|| encoder::find(codec::Id::H264))
-            .ok_or_else(|| anyhow::anyhow!("H264 encoder not found — is libx264 available?"))?
+        Pixel::YUV420P
     };
+
+    // Re-create scaler if we changed enc_format to 10-bit
+    if !hw_decode {
+        yuv_scaler = Some(ScalerContext::get(
+            src_format, width, height,
+            enc_format, width, height,
+            Flags::BILINEAR,
+        ).context("Failed to create scaler for target pixel format")?);
+    }
 
     let mut octx = format::output(&args.output).context("Failed to create output file")?;
     let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
-    let mut ost = octx.add_stream(h264).context("Failed to add output stream")?;
+    let mut ost = octx.add_stream(video_codec).context("Failed to add output stream")?;
 
     // Compute encoder time base from frame rate, with fallback for invalid rates
     let enc_time_base = if avg_frame_rate.numerator() > 0 && avg_frame_rate.denominator() > 0 {
@@ -276,7 +290,7 @@ fn transcode_segment(
         }
     };
 
-    let enc_ctx = codec::context::Context::new_with_codec(h264);
+    let enc_ctx = codec::context::Context::new_with_codec(video_codec);
     let mut video_enc = enc_ctx.encoder().video()?;
     video_enc.set_width(width);
     video_enc.set_height(height);
@@ -285,31 +299,133 @@ fn transcode_segment(
     video_enc.set_frame_rate(Some(avg_frame_rate));
 
     let mut opts = Dictionary::new();
-    if use_videotoolbox {
+    if is_videotoolbox {
+        // VideoToolbox (H.264 or HEVC hardware encoder — macOS)
         let target_bitrate = if args.bitrate > 0 {
             args.bitrate as usize * 1000
         } else {
             let pixels = width as usize * height as usize;
-            if pixels >= 1920 * 1080 {
-                20_000_000
+            if pixels >= 3840 * 2160 {
+                if is_hevc { 30_000_000 } else { 50_000_000 }
+            } else if pixels >= 1920 * 1080 {
+                if is_hevc { 10_000_000 } else { 20_000_000 }
             } else if pixels >= 1280 * 720 {
-                10_000_000
+                if is_hevc { 5_000_000 } else { 10_000_000 }
             } else {
-                5_000_000
+                if is_hevc { 2_500_000 } else { 5_000_000 }
             }
         };
         video_enc.set_bit_rate(target_bitrate);
-        opts.set("profile", "high");
+        opts.set("profile", if is_hevc { "main" } else { "high" });
         opts.set("realtime", "false");
         opts.set("allow_sw", "false");
-        info!("VideoToolbox encoder: bitrate={} bps", target_bitrate);
-    } else {
+        info!("{} encoder: bitrate={} bps", args.encoder, target_bitrate);
+    } else if is_nvenc {
+        // NVENC (NVIDIA GPU — Linux)
+        let target_bitrate = if args.bitrate > 0 {
+            args.bitrate as usize * 1000
+        } else {
+            let pixels = width as usize * height as usize;
+            let base = if pixels >= 3840 * 2160 { 40_000_000 }
+                else if pixels >= 1920 * 1080 { 15_000_000 }
+                else if pixels >= 1280 * 720 { 8_000_000 }
+                else { 4_000_000 };
+            if is_hevc || is_av1 { base * 2 / 3 } else { base }
+        };
+        video_enc.set_bit_rate(target_bitrate);
+        opts.set("preset", "p5");  // NVENC preset (p1=fastest .. p7=slowest)
+        opts.set("rc", "vbr");
+        if is_hevc {
+            opts.set("profile", "main");
+        } else if !is_av1 {
+            opts.set("profile", "high");
+        }
+        info!("{} encoder: bitrate={} bps, preset=p5", args.encoder, target_bitrate);
+    } else if is_vaapi {
+        // VAAPI (Intel/AMD GPU — Linux)
+        let target_bitrate = if args.bitrate > 0 {
+            args.bitrate as usize * 1000
+        } else {
+            let pixels = width as usize * height as usize;
+            let base = if pixels >= 3840 * 2160 { 40_000_000 }
+                else if pixels >= 1920 * 1080 { 15_000_000 }
+                else if pixels >= 1280 * 720 { 8_000_000 }
+                else { 4_000_000 };
+            if is_hevc { base * 2 / 3 } else { base }
+        };
+        video_enc.set_bit_rate(target_bitrate);
+        opts.set("rc_mode", "VBR");
+        if is_hevc {
+            opts.set("profile", "main");
+        } else {
+            opts.set("profile", "high");
+        }
+        info!("{} encoder: bitrate={} bps", args.encoder, target_bitrate);
+    } else if is_av1 {
+        // AV1 encoders (libsvtav1 or libaom-av1)
+        if args.encoder == "libsvtav1" {
+            // SVT-AV1: CRF mode, preset 0-13 (map x264 presets to SVT-AV1 presets)
+            let svt_preset = match args.preset.as_str() {
+                "ultrafast" => "12",
+                "superfast" => "10",
+                "veryfast" => "8",
+                "faster" => "7",
+                "fast" => "6",
+                "medium" => "5",
+                "slow" => "4",
+                "slower" => "2",
+                "veryslow" => "0",
+                other => other,  // allow direct numeric presets
+            };
+            opts.set("preset", svt_preset);
+            if args.bitrate > 0 {
+                video_enc.set_bit_rate(args.bitrate as usize * 1000);
+            } else {
+                opts.set("crf", &args.crf.to_string());
+            }
+            info!("SVT-AV1 encoder: preset={}, crf={}", svt_preset, args.crf);
+        } else {
+            // libaom-av1: CRF mode, cpu-used 0-8
+            let cpu_used = match args.preset.as_str() {
+                "ultrafast" => "8",
+                "superfast" => "7",
+                "veryfast" => "6",
+                "faster" => "5",
+                "fast" => "4",
+                "medium" => "3",
+                "slow" => "2",
+                "slower" => "1",
+                "veryslow" => "0",
+                other => other,
+            };
+            opts.set("cpu-used", cpu_used);
+            opts.set("row-mt", "1");
+            opts.set("tiles", "2x2");
+            if args.bitrate > 0 {
+                video_enc.set_bit_rate(args.bitrate as usize * 1000);
+            } else {
+                opts.set("crf", &args.crf.to_string());
+            }
+            info!("libaom-av1 encoder: cpu-used={}, crf={}", cpu_used, args.crf);
+        }
+    } else if is_hevc {
+        // libx265: CRF mode with preset
         opts.set("preset", &args.preset);
         if args.bitrate > 0 {
             video_enc.set_bit_rate(args.bitrate as usize * 1000);
         } else {
             opts.set("crf", &args.crf.to_string());
         }
+        info!("libx265 encoder: preset={}, crf={}", args.preset, args.crf);
+    } else {
+        // libx264: CRF mode with preset
+        opts.set("preset", &args.preset);
+        if args.bitrate > 0 {
+            video_enc.set_bit_rate(args.bitrate as usize * 1000);
+        } else {
+            opts.set("crf", &args.crf.to_string());
+        }
+        info!("libx264 encoder: preset={}, crf={}", args.preset, args.crf);
     }
 
     if global_header {
@@ -317,7 +433,7 @@ fn transcode_segment(
     }
 
     let mut opened_encoder = video_enc
-        .open_as_with(h264, opts)
+        .open_as_with(video_codec, opts)
         .context("Failed to open encoder")?;
     ost.set_parameters(&opened_encoder);
 
@@ -500,6 +616,52 @@ fn transcode_segment(
     info!("Encoded {} frames", frames_encoded);
 
     Ok(frames_encoded)
+}
+
+/// Find the FFmpeg encoder by name, with fallbacks for each codec family.
+fn find_encoder(name: &str) -> anyhow::Result<ffmpeg::Codec> {
+    match name {
+        // H.264 — CPU
+        "libx264" => encoder::find_by_name("libx264")
+            .or_else(|| encoder::find(codec::Id::H264))
+            .ok_or_else(|| anyhow::anyhow!("H.264 encoder not found — is libx264 available?")),
+        // H.264 — macOS GPU
+        "h264_videotoolbox" | "videotoolbox" => encoder::find_by_name("h264_videotoolbox")
+            .ok_or_else(|| anyhow::anyhow!("h264_videotoolbox not found — macOS only")),
+        // H.264 — NVIDIA GPU (Linux)
+        "h264_nvenc" => encoder::find_by_name("h264_nvenc")
+            .ok_or_else(|| anyhow::anyhow!("h264_nvenc not found — requires NVIDIA GPU + NVENC SDK")),
+        // H.264 — VAAPI (Linux Intel/AMD)
+        "h264_vaapi" => encoder::find_by_name("h264_vaapi")
+            .ok_or_else(|| anyhow::anyhow!("h264_vaapi not found — requires VAAPI-capable GPU + libva")),
+
+        // H.265 / HEVC — CPU
+        "libx265" => encoder::find_by_name("libx265")
+            .or_else(|| encoder::find(codec::Id::HEVC))
+            .ok_or_else(|| anyhow::anyhow!("H.265 encoder not found — is libx265 available?")),
+        // HEVC — macOS GPU
+        "hevc_videotoolbox" => encoder::find_by_name("hevc_videotoolbox")
+            .ok_or_else(|| anyhow::anyhow!("hevc_videotoolbox not found — macOS only")),
+        // HEVC — NVIDIA GPU (Linux)
+        "hevc_nvenc" => encoder::find_by_name("hevc_nvenc")
+            .ok_or_else(|| anyhow::anyhow!("hevc_nvenc not found — requires NVIDIA GPU + NVENC SDK")),
+        // HEVC — VAAPI (Linux Intel/AMD)
+        "hevc_vaapi" => encoder::find_by_name("hevc_vaapi")
+            .ok_or_else(|| anyhow::anyhow!("hevc_vaapi not found — requires VAAPI-capable GPU + libva")),
+
+        // AV1 — CPU
+        "libsvtav1" => encoder::find_by_name("libsvtav1")
+            .ok_or_else(|| anyhow::anyhow!("SVT-AV1 encoder not found — is libsvtav1 available?")),
+        "libaom-av1" => encoder::find_by_name("libaom-av1")
+            .ok_or_else(|| anyhow::anyhow!("libaom-av1 encoder not found — is libaom available?")),
+        // AV1 — NVIDIA GPU (Linux, RTX 40+ series)
+        "av1_nvenc" => encoder::find_by_name("av1_nvenc")
+            .ok_or_else(|| anyhow::anyhow!("av1_nvenc not found — requires NVIDIA RTX 40+ GPU")),
+
+        // Generic fallback: try find_by_name
+        other => encoder::find_by_name(other)
+            .ok_or_else(|| anyhow::anyhow!("Encoder '{}' not found", other)),
+    }
 }
 
 #[cfg(test)]
