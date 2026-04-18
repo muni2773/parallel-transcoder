@@ -3,11 +3,16 @@
   "version": "1.0.0",
   "description": "Massively parallel video transcoding with look-ahead optimization",
   "type": "module",
-  "main": "web/server.js",
+  "main": "desktop/main.js",
   "scripts": {
     "start": "node web/server.js",
     "web": "node web/server.js",
     "web:stop": "kill $(cat web/.web.pid) 2>/dev/null && echo 'Server stopped.' || echo 'Server not running.'",
+    "desktop": "electron .",
+    "desktop:pack": "electron-builder --dir",
+    "desktop:build": "electron-builder",
+    "desktop:build:mac": "electron-builder --mac",
+    "desktop:build:linux": "electron-builder --linux",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -26,7 +31,51 @@
     "multer": "^1.4.5-lts.1",
     "ws": "^8.18.0"
   },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
   "engines": {
     "node": ">=16.0.0"
+  },
+  "build": {
+    "appId": "com.munibajpai.parallel-transcoder",
+    "productName": "Parallel Transcoder",
+    "directories": {
+      "output": "desktop-dist",
+      "buildResources": "desktop/build"
+    },
+    "files": [
+      "desktop/**/*",
+      "web/server.js",
+      "web/public/**/*",
+      "package.json",
+      "!web/uploads/**/*",
+      "!web/outputs/**/*",
+      "!web/.web.pid",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
+      "!**/*.{o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}"
+    ],
+    "extraResources": [
+      { "from": "bin", "to": "bin", "filter": ["**/*"] },
+      { "from": "lib", "to": "lib", "filter": ["**/*"] }
+    ],
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.video",
+      "target": [{ "target": "dmg", "arch": ["arm64"] }],
+      "darkModeSupport": true,
+      "icon": "logo.svg"
+    },
+    "linux": {
+      "category": "AudioVideo",
+      "target": [{ "target": "AppImage", "arch": ["x64"] }],
+      "icon": "logo.svg"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "logo.svg"
+    }
   }
 }

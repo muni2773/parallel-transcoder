@@ -4,7 +4,7 @@ Development reference for working on this project.
 
 ## Project Overview
 
-Distributed, multi-node video transcoding engine with multi-codec support and hardware acceleration. Rust core with Node.js web interface.
+Distributed, multi-node video transcoding engine with multi-codec support and hardware acceleration. Rust core with Node.js web interface and Electron desktop app.
 
 ## Architecture
 
@@ -34,6 +34,15 @@ Distributed, multi-node video transcoding engine with multi-codec support and ha
    - REST API for upload, transcode, jobs, download
    - Cluster endpoints: `/api/cluster/status`, `/api/cluster/nodes`, `/api/cluster/transcode`
    - Dark-themed SPA with platform-aware encoder selection
+   - Desktop mode: binds `127.0.0.1`, random port, no CORS, no PID file
+
+5. **Desktop** (`desktop/`) — Electron wrapper for native app experience
+   - `main.js` — Spawns web server as child process, manages lifecycle
+   - `preload.js` — Context bridge for secure renderer communication
+   - `package.json` — CommonJS module for Electron compatibility
+   - Auto-discovers server port, opens BrowserWindow pointed at local server
+   - Graceful shutdown: kills server + transcoding jobs on quit
+   - Packaged via electron-builder (DMG on macOS, AppImage on Linux, NSIS on Windows)
 
 ## Key Technologies
 
@@ -42,6 +51,7 @@ Distributed, multi-node video transcoding engine with multi-codec support and ha
 | Cluster | Rust, tokio, tokio-tungstenite, DashMap, uuid, SRT via FFmpeg |
 | Coordinator/Worker | Rust, ffmpeg-next, tokio, clap, anyhow |
 | Web | Node.js, Express, ws, multer |
+| Desktop | Electron, electron-builder |
 
 ## Project Structure
 
@@ -53,8 +63,12 @@ parallel-transcoder/
 │   └── src/             # main, analyzer, segmenter
 ├── worker/              # Encoding engine (Rust crate)
 │   └── src/             # main (multi-codec)
+├── desktop/             # Electron desktop app
+│   ├── main.js          # Main process — server lifecycle, BrowserWindow
+│   ├── preload.js       # Context bridge
+│   └── package.json     # CommonJS shim for Electron
 ├── web/                 # Web server + UI
-│   ├── server.js        # Express + WebSocket + cluster API
+│   ├── server.js        # Express + WebSocket + cluster API + desktop mode
 │   └── public/index.html
 ├── docs/                # PLAN.md, RESEARCH.md
 ├── API.md               # Full API reference
@@ -73,6 +87,15 @@ cargo test
 
 # Start web server
 npm run web
+
+# Launch desktop app
+npm run desktop
+
+# Package desktop app (directory build)
+npm run desktop:pack
+
+# Build distributable (DMG/AppImage/NSIS)
+npm run desktop:build
 
 # Start cluster node
 ./bin/transcoder-node --listen 0.0.0.0:9000 --name node-1

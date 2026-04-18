@@ -19,6 +19,8 @@ lib/
 # Build artifacts
 dist/
 build/
+desktop-dist/
+out/
 
 # Temporary files
 *.tmp

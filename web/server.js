@@ -12,12 +12,15 @@ import http from "http";
 import https from "https";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const COORDINATOR_BIN = path.join(__dirname, "../bin/transcoder-coordinator");
-const LIB_DIR = path.join(__dirname, "../lib/");
+const RESOURCES_DIR = process.env.TRANSCODER_RESOURCES_DIR || path.join(__dirname, "..");
+const COORDINATOR_BIN = path.join(RESOURCES_DIR, "bin", "transcoder-coordinator");
+const LIB_DIR = path.join(RESOURCES_DIR, "lib") + path.sep;
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const OUTPUT_DIR = path.join(__dirname, "outputs");
 
-const PORT = parseInt(process.env.PORT || "3000", 10);
+const DESKTOP_MODE = process.env.DESKTOP_MODE === "1";
+const PORT = DESKTOP_MODE ? 0 : parseInt(process.env.PORT || "3000", 10);
+const HOST = DESKTOP_MODE ? "127.0.0.1" : undefined;
 const CLUSTER_MASTER = process.env.CLUSTER_MASTER || "localhost:9900";
 const MAX_LOG_LINES = 200;
 
@@ -63,14 +66,16 @@ const app = express();
 app.use(express.json());
 
 // CORS — allow any origin for API access
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
-  res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key");
-  res.header("Access-Control-Allow-Credentials", "true");
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
-});
+if (!DESKTOP_MODE) {
+  app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key");
+    res.header("Access-Control-Allow-Credentials", "true");
+    if (req.method === "OPTIONS") return res.sendStatus(204);
+    next();
+  });
+}
 
 // Optional API key authentication (set TRANSCODER_API_KEY env var to enable)
 const API_KEY = process.env.TRANSCODER_API_KEY || null;
@@ -870,14 +875,41 @@ function shutdown(signal) {
   }, 5000);
 }
 
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
+if (!DESKTOP_MODE) {
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+if (DESKTOP_MODE) {
+  const desktopShutdown = () => {
+    for (const job of jobs.values()) {
+      if (job.process) {
+        try { job.process.kill("SIGTERM"); } catch {}
+      }
+    }
+    try { server.close(); } catch {}
+    try { wss.close(); } catch {}
+    setTimeout(() => process.exit(0), 2000);
+  };
+  process.on("SIGTERM", desktopShutdown);
+  process.on("SIGINT", desktopShutdown);
+}
 
 // ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
-server.listen(PORT, () => {
-  // Write PID file so `npm run web:stop` can find us
-  fs.writeFileSync(PID_FILE, String(process.pid));
-  console.log(`Parallel Transcoder web server listening on http://localhost:${PORT} (pid ${process.pid})`);
-});
+const listenCallback = () => {
+  if (DESKTOP_MODE) {
+    const boundPort = server.address().port;
+    process.stdout.write(`__DESKTOP_READY__PORT=${boundPort}\n`);
+  } else {
+    fs.writeFileSync(PID_FILE, String(process.pid));
+    console.log(`Parallel Transcoder web server listening on http://localhost:${PORT} (pid ${process.pid})`);
+  }
+};
+
+if (HOST) {
+  server.listen(PORT, HOST, listenCallback);
+} else {
+  server.listen(PORT, listenCallback);
+}
