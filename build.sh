@@ -64,6 +64,9 @@ chmod +x bin/*
 
 echo "Step 4: Bundling FFmpeg libraries..."
 mkdir -p lib/
+# Clear stale bundles so an FFmpeg upgrade can't leave read-only copies of
+# old unversioned symlinks shadowing the new ones (cp fails silently on 0444).
+rm -f lib/*.dylib lib/*.so lib/*.so.*
 
 FFMPEG_LIBS="libavcodec libavformat libavutil libavfilter libavdevice libswscale libswresample"
 
