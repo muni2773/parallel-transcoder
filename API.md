@@ -194,6 +194,14 @@ Analyze complexity without encoding.
 
 These endpoints interact with a running cluster of `transcoder-node` daemons.
 
+All cluster endpoints accept an optional `master` parameter (query string for `GET`, JSON body for `POST`) so the UI can talk to any reachable master without restarting the server. When omitted, the server falls back to the `CLUSTER_MASTER` environment variable (default `localhost:9900`).
+
+```
+GET  /api/cluster/status?master=host:port
+GET  /api/cluster/nodes?master=host:port
+POST /api/cluster/transcode     { "master": "host:port", ... }
+```
+
 ### Cluster Status
 `GET /api/cluster/status`
 

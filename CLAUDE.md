@@ -32,16 +32,16 @@ Distributed, multi-node video transcoding engine with multi-codec support and ha
 
 4. **Web + API** (`web/`) — Express server with WebSocket
    - REST API for upload, transcode, jobs, download
-   - Cluster endpoints: `/api/cluster/status`, `/api/cluster/nodes`, `/api/cluster/transcode`
-   - Dark-themed SPA with platform-aware encoder selection
+   - Cluster endpoints: `/api/cluster/status`, `/api/cluster/nodes`, `/api/cluster/transcode` (all accept `?master=host:port` / `body.master` for per-request master override)
+   - Dark-themed SPA with platform-aware encoder selection and in-app **cluster panel** (master connect, nodes table, submit-to-cluster toggle)
    - Desktop mode: binds `127.0.0.1`, random port, no CORS, no PID file
 
 5. **Desktop** (`desktop/`) — Electron wrapper for native app experience
-   - `main.js` — Spawns web server as child process, manages lifecycle
-   - `preload.js` — Context bridge for secure renderer communication
+   - `main.js` — Spawns web server as child process, manages lifecycle; also spawns/stops a local `transcoder-node` via IPC handlers (`cluster:start-node`, `cluster:stop-node`, `cluster:node-state`, `cluster:node-logs`), streaming log/state events to the renderer
+   - `preload.js` — Context bridge exposing `window.desktop.cluster` (`startNode`, `stopNode`, `getNodeState`, `getLogs`, `onState`, `onLog`)
    - `package.json` — CommonJS module for Electron compatibility
    - Auto-discovers server port, opens BrowserWindow pointed at local server
-   - Graceful shutdown: kills server + transcoding jobs on quit
+   - Graceful shutdown: kills cluster node + server + transcoding jobs on quit
    - Packaged via electron-builder (DMG on macOS, AppImage on Linux, NSIS on Windows)
 
 ## Key Technologies

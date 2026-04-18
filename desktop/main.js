@@ -1,14 +1,28 @@
-const { app, BrowserWindow, shell, dialog } = require('electron');
+const { app, BrowserWindow, shell, dialog, ipcMain } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
+const os = require('os');
 
 const READY_TIMEOUT_MS = 15000;
 const SHUTDOWN_GRACE_MS = 3000;
+const NODE_LOG_BUFFER = 400;
 
 let serverProcess = null;
 let mainWindow = null;
 let allowedOrigin = null;
 let isQuitting = false;
+
+// Cluster node state
+let nodeProcess = null;
+let nodeState = {
+  running: false,
+  pid: null,
+  listen: null,
+  joinedMaster: null,
+  name: null,
+  startedAt: null,
+};
+const nodeLogs = [];
 
 function log(...args) {
   console.log('[desktop]', ...args);
@@ -34,6 +48,128 @@ function resolvePaths() {
     serverPath: path.join(__dirname, '..', 'web', 'server.js'),
     resourcesDir: path.join(__dirname, '..'),
   };
+}
+
+function resolveNodeBinary() {
+  const { resourcesDir } = resolvePaths();
+  return {
+    nodeBin: path.join(resourcesDir, 'bin', 'transcoder-node'),
+    workerBin: path.join(resourcesDir, 'bin', 'transcoder-worker'),
+    libDir: path.join(resourcesDir, 'lib') + path.sep,
+  };
+}
+
+function pushNodeLog(stream, line) {
+  const entry = { t: Date.now(), stream, line };
+  nodeLogs.push(entry);
+  if (nodeLogs.length > NODE_LOG_BUFFER) nodeLogs.shift();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('cluster:log', entry);
+  }
+}
+
+function emitNodeState() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('cluster:state', nodeState);
+  }
+}
+
+function startNode(opts = {}) {
+  if (nodeProcess && nodeProcess.exitCode === null) {
+    throw new Error('Cluster node already running');
+  }
+  const { nodeBin, workerBin, libDir } = resolveNodeBinary();
+
+  const listen = String(opts.listen || '0.0.0.0:9900').trim();
+  const name = (opts.name || os.hostname() || 'node').trim();
+  const join = opts.join ? String(opts.join).trim() : null;
+  const srtBasePort = Number.isFinite(opts.srtBasePort) ? opts.srtBasePort : 9910;
+  const verbose = !!opts.verbose;
+
+  const args = [
+    '--listen', listen,
+    '--name', name,
+    '--worker-binary', workerBin,
+    '--lib-dir', libDir,
+    '--srt-base-port', String(srtBasePort),
+  ];
+  if (join) args.push('--join', join);
+  if (verbose) args.push('--verbose');
+
+  log('spawning cluster node', nodeBin, args.join(' '));
+
+  const libPathKey = process.platform === 'darwin' ? 'DYLD_LIBRARY_PATH' : 'LD_LIBRARY_PATH';
+  const child = spawn(nodeBin, args, {
+    env: { ...process.env, [libPathKey]: libDir },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let bufOut = '';
+  let bufErr = '';
+  const splitLines = (chunk, bufRef, stream) => {
+    let buf = bufRef.value + chunk.toString('utf8');
+    let idx;
+    while ((idx = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, idx).replace(/\r$/, '');
+      buf = buf.slice(idx + 1);
+      if (line) pushNodeLog(stream, line);
+    }
+    bufRef.value = buf;
+  };
+  const outRef = { value: bufOut };
+  const errRef = { value: bufErr };
+
+  child.stdout.on('data', (chunk) => splitLines(chunk, outRef, 'stdout'));
+  child.stderr.on('data', (chunk) => splitLines(chunk, errRef, 'stderr'));
+
+  child.on('exit', (code, signal) => {
+    log('cluster node exited', { code, signal });
+    pushNodeLog('event', `exited code=${code} signal=${signal}`);
+    nodeProcess = null;
+    nodeState = {
+      running: false,
+      pid: null,
+      listen: null,
+      joinedMaster: null,
+      name: null,
+      startedAt: null,
+    };
+    emitNodeState();
+  });
+
+  child.on('error', (err) => {
+    log('cluster node spawn error', err.message);
+    pushNodeLog('event', `spawn error: ${err.message}`);
+  });
+
+  nodeProcess = child;
+  nodeState = {
+    running: true,
+    pid: child.pid,
+    listen,
+    joinedMaster: join,
+    name,
+    startedAt: Date.now(),
+  };
+  emitNodeState();
+  return { ...nodeState };
+}
+
+async function stopNode() {
+  if (!nodeProcess || nodeProcess.exitCode !== null) return { stopped: false };
+  log('stopping cluster node');
+  const proc = nodeProcess;
+  proc.kill('SIGTERM');
+  await new Promise((resolve) => {
+    const t = setTimeout(() => {
+      if (proc.exitCode === null) {
+        try { proc.kill('SIGKILL'); } catch {}
+      }
+      resolve();
+    }, SHUTDOWN_GRACE_MS);
+    proc.once('exit', () => { clearTimeout(t); resolve(); });
+  });
+  return { stopped: true };
 }
 
 function startServer() {
@@ -144,6 +280,31 @@ async function shutdownServer() {
   });
 }
 
+// IPC handlers for cluster node management
+ipcMain.handle('cluster:start-node', async (_event, opts) => {
+  try {
+    return { ok: true, state: startNode(opts || {}) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('cluster:stop-node', async () => {
+  try {
+    const res = await stopNode();
+    return { ok: true, ...res };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('cluster:node-state', async () => ({ ok: true, state: nodeState }));
+
+ipcMain.handle('cluster:node-logs', async (_event, limit) => {
+  const n = Math.max(1, Math.min(Number(limit) || 100, NODE_LOG_BUFFER));
+  return { ok: true, logs: nodeLogs.slice(-n) };
+});
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
@@ -182,6 +343,7 @@ if (!app.requestSingleInstanceLock()) {
     if (isQuitting) return;
     isQuitting = true;
     e.preventDefault();
+    await stopNode().catch(() => {});
     await shutdownServer();
     app.exit(0);
   });

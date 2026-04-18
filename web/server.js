@@ -21,8 +21,20 @@ const OUTPUT_DIR = path.join(__dirname, "outputs");
 const DESKTOP_MODE = process.env.DESKTOP_MODE === "1";
 const PORT = DESKTOP_MODE ? 0 : parseInt(process.env.PORT || "3000", 10);
 const HOST = DESKTOP_MODE ? "127.0.0.1" : undefined;
-const CLUSTER_MASTER = process.env.CLUSTER_MASTER || "localhost:9900";
+const DEFAULT_CLUSTER_MASTER = process.env.CLUSTER_MASTER || "localhost:9900";
 const MAX_LOG_LINES = 200;
+
+/** Resolve cluster master from request (query/body), falling back to env default. */
+function resolveMaster(req) {
+  const raw = (req.query && req.query.master) || (req.body && req.body.master) || DEFAULT_CLUSTER_MASTER;
+  const m = String(raw).trim().replace(/^ws:\/\//i, "").replace(/\/+$/, "");
+  if (!/^[A-Za-z0-9_.\-]+:\d+$/.test(m)) {
+    const err = new Error(`Invalid cluster master address: ${raw}`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return m;
+}
 
 // Platform-aware library path variable
 const LIB_PATH_KEY = process.platform === "darwin" ? "DYLD_LIBRARY_PATH" : "LD_LIBRARY_PATH";
@@ -427,18 +439,24 @@ app.get("/api/download/:jobId/:filename", (req, res) => {
 
 // Cluster status
 app.get("/api/cluster/status", async (req, res) => {
+  let master;
+  try { master = resolveMaster(req); }
+  catch (err) { return res.status(err.statusCode || 400).json({ error: err.message }); }
   try {
-    const status = await queryCluster("StatusRequest");
-    res.json(status);
+    const status = await queryCluster(master);
+    res.json({ master, ...status });
   } catch (err) {
-    res.status(503).json({ error: `Cluster unreachable: ${err.message}` });
+    res.status(503).json({ master, error: `Cluster unreachable: ${err.message}` });
   }
 });
 
 // List cluster nodes
 app.get("/api/cluster/nodes", async (req, res) => {
+  let master;
+  try { master = resolveMaster(req); }
+  catch (err) { return res.status(err.statusCode || 400).json({ error: err.message }); }
   try {
-    const status = await queryCluster("StatusRequest");
+    const status = await queryCluster(master);
     res.json(status.nodes || []);
   } catch (err) {
     res.status(503).json({ error: `Cluster unreachable: ${err.message}` });
@@ -447,6 +465,10 @@ app.get("/api/cluster/nodes", async (req, res) => {
 
 // Submit transcode job to the cluster
 app.post("/api/cluster/transcode", async (req, res) => {
+  let master;
+  try { master = resolveMaster(req); }
+  catch (err) { return res.status(err.statusCode || 400).json({ error: err.message }); }
+
   const {
     uploadId,
     format = "hls",
@@ -467,7 +489,7 @@ app.post("/api/cluster/transcode", async (req, res) => {
   const jobId = crypto.randomUUID();
 
   try {
-    const result = await submitClusterJob({
+    const result = await submitClusterJob(master, {
       jobId,
       inputPath,
       format,
@@ -475,7 +497,7 @@ app.post("/api/cluster/transcode", async (req, res) => {
       preset,
       encoder,
     });
-    res.json({ jobId, status: "submitted", clusterId: result.jobId });
+    res.json({ jobId, master, status: "submitted", clusterId: result.jobId });
   } catch (err) {
     res.status(500).json({ error: `Cluster submission failed: ${err.message}` });
   }
@@ -672,9 +694,9 @@ function listOutputFiles(dir) {
 }
 
 /** Query the cluster master via WebSocket and return the response. */
-function queryCluster(requestType, timeout = 5000) {
+function queryCluster(master, timeout = 5000) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://${CLUSTER_MASTER}`);
+    const ws = new WebSocket(`ws://${master}`);
 
     const timer = setTimeout(() => {
       ws.close();
@@ -711,9 +733,9 @@ function queryCluster(requestType, timeout = 5000) {
 }
 
 /** Submit a transcode job to the cluster master. */
-function submitClusterJob({ jobId, inputPath, format, crf, preset, encoder }) {
+function submitClusterJob(master, { jobId, inputPath, format, crf, preset, encoder }) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://${CLUSTER_MASTER}`);
+    const ws = new WebSocket(`ws://${master}`);
 
     const timer = setTimeout(() => {
       ws.close();

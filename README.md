@@ -10,6 +10,7 @@ A distributed, multi-node video transcoding engine with intelligent segment allo
 - **Smart Mode** — Complexity-aware encoding that skips segments below a tolerance threshold
 - **Parallel Workers** — Keyframe-aligned segmentation with complexity-balanced distribution across cores and machines
 - **Web UI** — Dark-themed SPA with drag-and-drop upload, real-time WebSocket progress, and output downloads
+- **Desktop App** — Electron wrapper with in-app cluster management: connect to any master, view nodes table, start/stop a local `transcoder-node`, and route transcodes to the cluster with one toggle
 - **REST API** — Full programmatic control with optional API key authentication
 - **Cross-Platform** — macOS (ARM64/x86_64) and Linux (RHEL, Rocky, Fedora, CentOS)
 
