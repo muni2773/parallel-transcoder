@@ -16,13 +16,13 @@ mod segmenter;
 #[command(name = "transcoder-coordinator")]
 #[command(about = "Coordinator for parallel video transcoding", long_about = None)]
 struct Args {
-    /// Input video file path
+    /// Input video file path (optional; typically supplied by the GUI)
     #[arg(short, long)]
-    input: String,
+    input: Option<String>,
 
-    /// Output path (directory for HLS, file for MP4)
+    /// Output path (directory for HLS, file for MP4; optional, typically supplied by the GUI)
     #[arg(short, long)]
-    output: String,
+    output: Option<String>,
 
     /// Number of worker processes (0 = auto-detect CPU cores)
     #[arg(short, long, default_value = "0")]
@@ -102,12 +102,9 @@ struct SegmentDescriptor {
 #[derive(Debug, Deserialize)]
 struct WorkerResult {
     segment_id: usize,
-    worker_id: usize,
     frames_encoded: u64,
     output_size_bytes: u64,
     encoding_time_secs: f64,
-    average_complexity: f32,
-    scene_changes_detected: u64,
     output_path: String,
 }
 
@@ -117,8 +114,6 @@ enum CopyBlocker {
     CodecMismatch { source: String, target: String },
     ProfileIncompatible { source: String, target: String },
     PixFmtMismatch { source: String, target: String },
-    NoGopData,
-    BitrateTooFar { ratio: f64, tolerance: f64 },
 }
 
 /// Smart mode report output (JSON to stdout).
@@ -181,8 +176,13 @@ async fn main() -> Result<()> {
     } else if smart {
         info!("Mode: SMART (per-segment copy-or-encode, tolerance=±{:.0}%)", args.smart_tolerance * 100.0);
     }
-    info!("Input: {}", args.input);
-    info!("Output: {}", args.output);
+    let input_arg = args.input.as_deref()
+        .context("--input is required (provide it on the command line or via the GUI)")?;
+    let output_arg = args.output.as_deref()
+        .context("--output is required (provide it on the command line or via the GUI)")?;
+
+    info!("Input: {}", input_arg);
+    info!("Output: {}", output_arg);
 
     let num_workers = if args.workers == 0 {
         std::thread::available_parallelism()
@@ -195,8 +195,8 @@ async fn main() -> Result<()> {
         info!("Using {} worker processes", num_workers);
     }
 
-    let input_path = std::fs::canonicalize(&args.input)
-        .with_context(|| format!("Input file not found: {}", args.input))?;
+    let input_path = std::fs::canonicalize(input_arg)
+        .with_context(|| format!("Input file not found: {}", input_arg))?;
 
     // Phase 1 — Video Analysis
     info!("Step 1: Analyzing video{}...", if fast { " (fast mode)" } else { "" });
@@ -245,9 +245,9 @@ async fn main() -> Result<()> {
     }
 
     // Prepare output directory
-    let output_dir = Path::new(&args.output);
+    let output_dir = Path::new(output_arg);
     std::fs::create_dir_all(output_dir)
-        .with_context(|| format!("Failed to create output directory: {}", args.output))?;
+        .with_context(|| format!("Failed to create output directory: {}", output_arg))?;
 
     // Phase 2.5 — Pre-split segments (fast or copy mode)
     // Creates small .ts files per segment via stream copy, so each worker reads only its portion.
@@ -332,7 +332,6 @@ async fn main() -> Result<()> {
                         info!("  Profile incompatible: source={}, target={}", source, target),
                     CopyBlocker::PixFmtMismatch { source, target } =>
                         info!("  Pixel format mismatch: source={}, target={}", source, target),
-                    _ => {}
                 }
             }
         }
@@ -454,7 +453,7 @@ async fn main() -> Result<()> {
         }).collect();
 
         let report = SmartReport {
-            input: args.input.clone(),
+            input: input_arg.to_string(),
             segments: segment_reports,
             summary: ReportSummary {
                 total_segments: segments.len(),
@@ -499,12 +498,9 @@ async fn main() -> Result<()> {
                 let frames = seg.end_frame.saturating_sub(seg.start_frame) + 1;
                 completed.push(WorkerResult {
                     segment_id: seg.id,
-                    worker_id: 0,
                     frames_encoded: frames,
                     output_size_bytes: size,
                     encoding_time_secs: 0.0,
-                    average_complexity: seg.complexity_estimate,
-                    scene_changes_detected: seg.contains_scene_changes.len() as u64,
                     output_path: final_path.to_string_lossy().to_string(),
                 });
             }
@@ -1279,7 +1275,7 @@ fn find_worker_binary() -> Result<PathBuf> {
 async fn run_cluster_mode(
     args: &Args,
     input_path: &Path,
-    metadata: &analyzer::VideoMetadata,
+    _metadata: &analyzer::VideoMetadata,
     _segments: &[segmenter::Segment],
 ) -> Result<()> {
     use transcoder_cluster::protocol::*;

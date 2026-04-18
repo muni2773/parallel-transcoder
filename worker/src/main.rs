@@ -235,7 +235,7 @@ fn transcode_segment(
     // Convert decoded frames to target pixel format for encoding.
     // For hw decode, defer scaler init until we see the actual frame format.
     // enc_format may be overridden below for 10-bit HEVC/AV1.
-    let mut enc_format = Pixel::YUV420P;
+    let enc_format = Pixel::YUV420P;
 
     let mut yuv_scaler: Option<ScalerContext> = if !hw_decode {
         Some(ScalerContext::get(
@@ -472,7 +472,7 @@ fn transcode_segment(
     let mut enc_packet = ffmpeg::Packet::empty();
 
     // Helper closure-like processing for each decoded frame
-    let mut process_frame = |frame_ref: &Video,
+    let process_frame = |frame_ref: &Video,
                              yuv_scaler: &mut Option<ScalerContext>,
                              opened_encoder: &mut ffmpeg::encoder::video::Video,
                              enc_packet: &mut ffmpeg::Packet,

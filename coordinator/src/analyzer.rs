@@ -67,11 +67,9 @@ pub struct VideoMetadata {
     pub keyframe_timestamps: Vec<f64>,
     pub scene_changes: Vec<u64>,
     pub complexity_map: Vec<f32>,
-    pub time_base: (i32, i32),
     /// Per-GOP bitrate stats (only populated by fast_analyze_video)
     pub gop_stats: Vec<GopStats>,
     pub profile: Option<String>,
-    pub level: Option<i64>,
     pub pix_fmt: Option<String>,
     pub audio_tracks: Vec<AudioTrackInfo>,
     pub subtitle_tracks: Vec<SubtitleTrackInfo>,
@@ -268,10 +266,8 @@ pub fn analyze_video(input_path: &str) -> Result<VideoMetadata> {
         keyframe_timestamps,
         scene_changes,
         complexity_map,
-        time_base: (tb_num, tb_den),
         gop_stats: vec![], // only populated by fast_analyze_video
         profile: None,
-        level: None,
         pix_fmt: None,
         audio_tracks: vec![],
         subtitle_tracks: vec![],
@@ -337,14 +333,10 @@ pub fn fast_analyze_video(input_path: &str) -> Result<VideoMetadata> {
         .unwrap_or("unknown")
         .to_string();
     let profile = stream["profile"].as_str().map(|s| s.to_string());
-    let level = stream["level"].as_i64();
     let pix_fmt = stream["pix_fmt"].as_str().map(|s| s.to_string());
 
     // Parse fps from r_frame_rate (e.g. "30000/1001")
     let fps = parse_rational_str(stream["r_frame_rate"].as_str().unwrap_or("30/1"));
-
-    // Parse time_base (e.g. "1/30000")
-    let (tb_num, tb_den) = parse_time_base_str(stream["time_base"].as_str().unwrap_or("1/90000"));
 
     // Duration: try stream duration, then format duration
     let duration_secs = stream["duration"]
@@ -598,10 +590,8 @@ pub fn fast_analyze_video(input_path: &str) -> Result<VideoMetadata> {
         keyframe_timestamps,
         scene_changes: vec![],
         complexity_map: vec![0.5; num_frames],
-        time_base: (tb_num, tb_den),
         gop_stats,
         profile,
-        level,
         pix_fmt,
         audio_tracks,
         subtitle_tracks,
@@ -617,17 +607,6 @@ fn parse_rational_str(s: &str) -> f64 {
         if d != 0.0 { n / d } else { 30.0 }
     } else {
         s.parse().unwrap_or(30.0)
-    }
-}
-
-/// Parse a time_base string like "1/90000" into (numerator, denominator).
-fn parse_time_base_str(s: &str) -> (i32, i32) {
-    if let Some((num, den)) = s.split_once('/') {
-        let n: i32 = num.parse().unwrap_or(1);
-        let d: i32 = den.parse().unwrap_or(90000);
-        (n, d)
-    } else {
-        (1, 90000)
     }
 }
 
