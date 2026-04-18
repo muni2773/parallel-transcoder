@@ -15,6 +15,7 @@ package-lock.json
 *.mcpb
 bin/*
 !bin/transcoder-desktop
+!bin/test.sh
 lib/
 
 # Build artifacts

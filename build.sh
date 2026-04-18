@@ -1,6 +1,20 @@
 #!/bin/bash
 set -e
 
+# Parse args
+RUN_TESTS=1
+for arg in "$@"; do
+    case "$arg" in
+        --skip-tests) RUN_TESTS=0 ;;
+        -h|--help)
+            echo "Usage: $0 [--skip-tests]"
+            echo "  --skip-tests    Build without running bin/test.sh afterward"
+            exit 0
+            ;;
+        *) echo "Unknown arg: $arg" >&2; exit 2 ;;
+    esac
+done
+
 echo "=== Building Parallel Video Transcoder ==="
 
 # Check for Rust
@@ -160,6 +174,24 @@ ls -lh bin/
 echo ""
 echo "Libraries:"
 ls -lh lib/ 2>/dev/null || echo "No libraries bundled (will use system FFmpeg)"
+
+# Step 5: Run the test suite. All current and future tests are driven
+# through bin/test.sh so the build verifies a working artifact set.
+# Use `./build.sh --skip-tests` to bypass (e.g. iterative local builds).
+if [ "$RUN_TESTS" = "1" ]; then
+    echo ""
+    echo "Step 5: Running tests (bin/test.sh)..."
+    if [ -x bin/test.sh ]; then
+        bin/test.sh
+    else
+        echo "Error: bin/test.sh missing or not executable" >&2
+        exit 1
+    fi
+else
+    echo ""
+    echo "Skipping tests (--skip-tests). Run them manually with: bin/test.sh"
+fi
+
 echo ""
 echo "Next steps:"
 echo "  1. Test: ./bin/transcoder-coordinator --help"
