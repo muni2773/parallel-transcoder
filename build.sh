@@ -37,6 +37,14 @@ if [ -f target/release/transcoder-node ]; then
     cp target/release/transcoder-node bin/
 fi
 
+# Validate desktop launcher shell script
+if [ -f bin/transcoder-desktop ]; then
+    echo "  Validating bin/transcoder-desktop syntax..."
+    bash -n bin/transcoder-desktop
+else
+    echo "  Warning: bin/transcoder-desktop not found"
+fi
+
 # Make binaries executable
 chmod +x bin/*
 
@@ -156,4 +164,5 @@ echo ""
 echo "Next steps:"
 echo "  1. Test: ./bin/transcoder-coordinator --help"
 echo "  2. Cluster: ./bin/transcoder-node --help"
-echo "  3. Package: ./package.sh"
+echo "  3. Desktop: ./bin/transcoder-desktop"
+echo "  4. Package: ./package.sh"
