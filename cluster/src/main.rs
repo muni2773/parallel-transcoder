@@ -31,6 +31,7 @@ use uuid::Uuid;
 // commented out in lib.rs, uncomment them before building.
 use transcoder_cluster::election::ElectionManager;
 use transcoder_cluster::node::NodeManager;
+use transcoder_cluster::object_store::{is_s3_uri, ObjectStore};
 use transcoder_cluster::protocol::*;
 use transcoder_cluster::scheduler::Scheduler;
 use transcoder_cluster::srt::{SrtMode, SrtServer};
@@ -139,6 +140,9 @@ struct App {
     /// CLI configuration.
     worker_binary: PathBuf,
     lib_dir: PathBuf,
+    /// Optional object-storage client (K8s mode). When present, segment
+    /// transfer goes through the bucket instead of SRT.
+    object_store: Option<ObjectStore>,
 }
 
 impl App {
@@ -150,6 +154,7 @@ impl App {
         worker_binary: PathBuf,
         lib_dir: PathBuf,
         srt_base_port: u16,
+        object_store: Option<ObjectStore>,
     ) -> Self {
         Self {
             node_id,
@@ -165,6 +170,7 @@ impl App {
             pending_results: HashMap::new(),
             worker_binary,
             lib_dir,
+            object_store,
         }
     }
 
@@ -485,17 +491,24 @@ impl App {
                 None => continue,
             };
 
-            let srt_port = self.srt.allocate_port();
-            let srt_url = SrtServer::build_url(
-                &self.listen_addr.ip().to_string(),
-                srt_port,
-                SrtMode::Caller,
-            );
+            // In K8s mode, the master writes the segment input into the
+            // bucket and hands the worker an s3:// URI. In LAN/desktop mode
+            // we keep the existing SRT data plane.
+            let transfer_url = if let Some(store) = &self.object_store {
+                store.build_uri(&format!("jobs/{}/input/seg_{}.ts", job_id, segment.id))
+            } else {
+                let srt_port = self.srt.allocate_port();
+                SrtServer::build_url(
+                    &self.listen_addr.ip().to_string(),
+                    srt_port,
+                    SrtMode::Caller,
+                )
+            };
 
             let assign_data = SegmentAssignData {
                 job_id,
                 segment: segment.clone(),
-                srt_url,
+                srt_url: transfer_url,
                 encoding_config: ctx.config.clone(),
             };
 
@@ -556,6 +569,7 @@ impl App {
         let lib_dir = self.lib_dir.clone();
         let listen_addr = self.listen_addr;
         let srt_port = self.srt.allocate_port();
+        let object_store = self.object_store.clone();
 
         // Channel for the spawned task to send results back to the event loop.
         // We don't have access to the transport from a spawned task, so we use
@@ -573,6 +587,7 @@ impl App {
                 node_id,
                 listen_addr,
                 srt_port,
+                object_store.as_ref(),
             )
             .await;
 
@@ -581,7 +596,8 @@ impl App {
                 segment_id,
                 node_id,
                 srt_port,
-                outcome,
+                output_uri: outcome.as_ref().ok().and_then(|r| r.output_uri.clone()),
+                outcome: outcome.map(|r| r.result),
             });
         });
 
@@ -603,11 +619,16 @@ impl App {
 
                     match result_msg.outcome {
                         Ok(seg_result) => {
-                            let srt_output_url = SrtServer::build_url(
-                                &self.listen_addr.ip().to_string(),
-                                result_msg.srt_port,
-                                SrtMode::Listener,
-                            );
+                            // If the worker uploaded to S3, carry that URI;
+                            // otherwise fall back to an SRT listener URL
+                            // pointing at this node.
+                            let srt_output_url = result_msg.output_uri.unwrap_or_else(|| {
+                                SrtServer::build_url(
+                                    &self.listen_addr.ip().to_string(),
+                                    result_msg.srt_port,
+                                    SrtMode::Listener,
+                                )
+                            });
                             let complete = SegmentCompleteData {
                                 job_id: result_msg.job_id,
                                 result: seg_result,
@@ -857,8 +878,18 @@ struct ResultMessage {
     job_id: JobId,
     segment_id: usize,
     node_id: NodeId,
+    /// SRT port reserved for this segment's output (unused in K8s mode).
     srt_port: u16,
+    /// `s3://bucket/key` of the uploaded output, if the worker used S3.
+    output_uri: Option<String>,
     outcome: Result<SegmentResult>,
+}
+
+/// Outcome of a single worker invocation: the encoder result plus an
+/// optional object-store URI where the encoded output was uploaded.
+struct WorkerOutcome {
+    result: SegmentResult,
+    output_uri: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -898,7 +929,9 @@ fn analyze_video(data: &JobSubmitData) -> Vec<SegmentDescriptor> {
 
 /// Spawn the transcoder-worker binary for a single segment.
 ///
-/// Returns a `SegmentResult` on success.
+/// Returns a `WorkerOutcome` on success. Fetches input and uploads output
+/// through the object store when `object_store` is `Some` and the transfer
+/// URL is an `s3://` URI; otherwise uses the SRT data plane.
 async fn spawn_worker(
     worker_binary: &PathBuf,
     lib_dir: &PathBuf,
@@ -906,7 +939,8 @@ async fn spawn_worker(
     node_id: NodeId,
     _listen_addr: SocketAddr,
     _srt_port: u16,
-) -> Result<SegmentResult> {
+    object_store: Option<&ObjectStore>,
+) -> Result<WorkerOutcome> {
     use tokio::process::Command;
 
     let start_time = std::time::Instant::now();
@@ -916,16 +950,31 @@ async fn spawn_worker(
     let input_path = tmp_dir.join(format!("segment_{}.ts", data.segment.id));
     let output_path = tmp_dir.join(format!("segment_{}_out.ts", data.segment.id));
 
-    // Step 1: Fetch the segment data from the master via SRT.
+    // Step 1: Fetch the segment data. The URI scheme determines the transport —
+    // S3 (K8s mode) vs SRT (LAN / desktop).
     if !data.srt_url.is_empty() {
-        info!(
-            segment_id = data.segment.id,
-            srt_url = %data.srt_url,
-            "Fetching segment data via SRT"
-        );
-        SrtServer::fetch_file(&data.srt_url, &input_path)
-            .await
-            .context("Failed to fetch segment via SRT")?;
+        if is_s3_uri(&data.srt_url) {
+            let store = object_store.ok_or_else(|| {
+                anyhow::anyhow!("received s3:// assignment but no object-store client configured")
+            })?;
+            info!(
+                segment_id = data.segment.id,
+                uri = %data.srt_url,
+                "Fetching segment data from object store"
+            );
+            ObjectStore::download_to_file(&data.srt_url, store, &input_path)
+                .await
+                .context("Failed to fetch segment from object store")?;
+        } else {
+            info!(
+                segment_id = data.segment.id,
+                srt_url = %data.srt_url,
+                "Fetching segment data via SRT"
+            );
+            SrtServer::fetch_file(&data.srt_url, &input_path)
+                .await
+                .context("Failed to fetch segment via SRT")?;
+        }
     }
 
     // Step 2: Spawn the worker binary.
@@ -978,28 +1027,48 @@ async fn spawn_worker(
         );
     }
 
-    // Step 3: Parse the result. Try structured JSON from stdout first.
+    // Step 3: Parse the result. Try structured JSON from stdout first,
+    // fall back to synthesized metadata.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if let Ok(result) = serde_json::from_str::<SegmentResult>(stdout.trim()) {
-        return Ok(result);
-    }
+    let result = serde_json::from_str::<SegmentResult>(stdout.trim()).unwrap_or_else(|_| {
+        let output_size = std::fs::metadata(&output_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        SegmentResult {
+            segment_id: data.segment.id,
+            worker_id: 0,
+            node_id,
+            frames_encoded: data.segment.end_frame.saturating_sub(data.segment.start_frame),
+            output_size_bytes: output_size,
+            encoding_time_secs: elapsed.as_secs_f64(),
+            average_complexity: data.segment.complexity_estimate,
+            scene_changes_detected: data.segment.scene_changes.len() as u64,
+        }
+    });
 
-    // Fallback: construct result from available metadata.
-    let output_size = tokio::fs::metadata(&output_path)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0);
+    // Step 4: Upload the encoded output to the object store if we're in
+    // K8s mode (input URI was s3://). The master will see the resulting
+    // URI in SegmentCompleteData.srt_output_url and fetch from there.
+    let output_uri = if is_s3_uri(&data.srt_url) {
+        let store = object_store.ok_or_else(|| {
+            anyhow::anyhow!("s3:// input but no object-store client for output upload")
+        })?;
+        let out_key = format!("jobs/{}/output/seg_{}.ts", data.job_id, data.segment.id);
+        info!(
+            segment_id = data.segment.id,
+            key = %out_key,
+            "Uploading encoded output to object store"
+        );
+        store
+            .upload_file(&out_key, &output_path)
+            .await
+            .context("Failed to upload encoded segment to object store")?;
+        Some(store.build_uri(&out_key))
+    } else {
+        None
+    };
 
-    Ok(SegmentResult {
-        segment_id: data.segment.id,
-        worker_id: 0,
-        node_id,
-        frames_encoded: data.segment.end_frame.saturating_sub(data.segment.start_frame),
-        output_size_bytes: output_size,
-        encoding_time_secs: elapsed.as_secs_f64(),
-        average_complexity: data.segment.complexity_estimate,
-        scene_changes_detected: data.segment.scene_changes.len() as u64,
-    })
+    Ok(WorkerOutcome { result, output_uri })
 }
 
 // ---------------------------------------------------------------------------
@@ -1075,6 +1144,21 @@ async fn main() -> Result<()> {
     transport.listen().await?;
     info!("WebSocket transport listening on {}", listen_addr);
 
+    // Optional object-storage client. Bucket comes from OBJECT_STORE_BUCKET
+    // (set via ConfigMap in the overlays) with a sane default for dev.
+    let object_store = if let Some(ref url) = cli.object_store_url {
+        let bucket = std::env::var("OBJECT_STORE_BUCKET")
+            .unwrap_or_else(|_| "transcoder-segments".to_string());
+        info!(endpoint = %url, bucket = %bucket, "Connecting to object store");
+        Some(
+            ObjectStore::connect(url, bucket)
+                .await
+                .context("Failed to connect to object store")?,
+        )
+    } else {
+        None
+    };
+
     // Build application state.
     let mut app = App::new(
         node_id,
@@ -1084,6 +1168,7 @@ async fn main() -> Result<()> {
         cli.worker_binary,
         cli.lib_dir,
         cli.srt_base_port,
+        object_store,
     );
 
     // Register ourselves in the node table.

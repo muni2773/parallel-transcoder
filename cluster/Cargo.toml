@@ -33,3 +33,10 @@ dashmap = "6"
 rand = "0.8"
 sha2 = "0.10"
 tokio-tungstenite = "0.24"
+
+# Object-storage client (S3 / MinIO / any S3-compatible endpoint).
+# Used when --object-store-url is set; the SRT data plane remains the
+# default for desktop / LAN clusters.
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+aws-credential-types = "1"
