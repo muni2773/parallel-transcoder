@@ -38,6 +38,25 @@ OS="$(uname -s)"
 ARCH="$(uname -m)"
 echo "Platform: ${OS} ${ARCH}"
 
+# Purge stale ffmpeg-sys-next build-script caches. Cargo bakes the full
+# Homebrew Cellar path (e.g. .../ffmpeg-full/8.1_1/lib) into the build-script
+# output and does not re-run when Homebrew bumps the revision, so linking
+# fails with "library 'avutil' not found". `cargo clean -p ffmpeg-sys-next`
+# misses cross-feature fingerprint variants, so nuke the dirs directly.
+if [ -d target ]; then
+    stale_ffmpeg_cache=0
+    while IFS= read -r outfile; do
+        while IFS= read -r p; do
+            [ -n "$p" ] && [ ! -d "$p" ] && { stale_ffmpeg_cache=1; break; }
+        done < <(sed -n 's/^cargo:rustc-link-search=native=//p' "$outfile")
+        [ "$stale_ffmpeg_cache" = "1" ] && break
+    done < <(find target -type f -path '*/build/ffmpeg-sys-next-*/output' 2>/dev/null)
+    if [ "$stale_ffmpeg_cache" = "1" ]; then
+        echo "Stale FFmpeg link path detected — purging ffmpeg-sys-next cache"
+        find target -type d \( -path '*/build/ffmpeg-sys-next-*' -o -path '*/.fingerprint/ffmpeg-sys-next-*' \) -exec rm -rf {} + 2>/dev/null || true
+    fi
+fi
+
 echo "Step 1: Building Rust binaries..."
 cargo build --release
 
