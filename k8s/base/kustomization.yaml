@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: transcoder
+
+commonLabels:
+  app.kubernetes.io/part-of: parallel-transcoder
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - service.yaml
+  - statefulset.yaml

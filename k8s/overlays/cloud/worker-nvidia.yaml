@@ -1,0 +1,79 @@
+# NVIDIA worker pool — pods land on nodes with the NVIDIA device plugin,
+# --join pod-0 of the master StatefulSet, never run bully election (always
+# pass --k8s-mode + --join), pick NVENC via ENCODER_GPU=nvidia.
+#
+# Expects:
+#   - NVIDIA GPU Operator installed (provides nvidia.com/gpu extended resource)
+#   - Nodes labeled workload-class=gpu-nvidia
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transcoder-worker-nvidia
+  labels:
+    app.kubernetes.io/name: transcoder-node
+    pool: gpu-nvidia
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: transcoder-node
+      pool: gpu-nvidia
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: transcoder-node
+        pool: gpu-nvidia
+    spec:
+      serviceAccountName: transcoder-node
+      terminationGracePeriodSeconds: 30
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload-class
+                    operator: In
+                    values: ["gpu-nvidia"]
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: transcoder-node
+          image: transcoder-node:dev
+          command:
+            - /usr/bin/tini
+            - --
+            - /usr/local/bin/transcoder-node
+            - --listen
+            - 0.0.0.0:9900
+            - --k8s-mode
+            - --join
+            - transcoder-node-0.transcoder.transcoder.svc.cluster.local:9900
+            - --worker-binary
+            - /usr/local/bin/transcoder-worker
+            - --lib-dir
+            - /usr/local/lib
+          env:
+            - name: ENCODER_GPU
+              value: "nvidia"
+            - name: POD_ORDINAL  # any non-zero; --join path skips election anyway
+              value: "100"
+            - name: OBJECT_STORE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: transcoder-config
+                  key: object-store-url
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: "16Gi"
+              nvidia.com/gpu: "1"
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "kill -TERM 1; sleep 2"]

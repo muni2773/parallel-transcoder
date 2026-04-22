@@ -1,0 +1,10 @@
+# Three-node kind cluster so topologySpreadConstraints actually has somewhere
+# to spread to. Reduce to control-plane + 1 worker if RAM is tight.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: transcoder
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+  - role: worker

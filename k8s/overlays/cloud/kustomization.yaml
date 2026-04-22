@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: transcoder
+
+resources:
+  - ../../base
+  - worker-nvidia.yaml
+  - worker-vaapi.yaml
+  - worker-avx512.yaml
+
+patches:
+  - path: master-patch.yaml
+    target:
+      kind: StatefulSet
+      name: transcoder-node
+  - path: configmap-patch.yaml
+    target:
+      kind: ConfigMap
+      name: transcoder-config
+  - path: serviceaccount-patch.yaml
+    target:
+      kind: ServiceAccount
+      name: transcoder-node
+
+images:
+  - name: transcoder-node
+    # Point at your registry; CI should replace this tag on each build.
+    newName: ghcr.io/yourorg/transcoder-node
+    newTag: "v0.1.0"

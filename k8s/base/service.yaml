@@ -1,0 +1,37 @@
+# Headless service gives each StatefulSet pod a stable DNS name:
+#   transcoder-node-0.transcoder.transcoder.svc.cluster.local
+# which non-zero pods use to --join back to pod-0 (the deterministic master).
+apiVersion: v1
+kind: Service
+metadata:
+  name: transcoder
+  labels:
+    app.kubernetes.io/name: transcoder-node
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: transcoder-node
+  ports:
+    - name: cluster-ws
+      port: 9900
+      protocol: TCP
+---
+# Separate "lb" service for the coordinator / web server to submit jobs to the
+# current master. In k8s-mode the master is always pod-0, so this just
+# front-ends transcoder-node-0 via an endpoint subset.
+apiVersion: v1
+kind: Service
+metadata:
+  name: transcoder-master
+  labels:
+    app.kubernetes.io/name: transcoder-node
+    role: master
+spec:
+  selector:
+    app.kubernetes.io/name: transcoder-node
+    statefulset.kubernetes.io/pod-name: transcoder-node-0
+  ports:
+    - name: cluster-ws
+      port: 9900
+      targetPort: 9900
+      protocol: TCP

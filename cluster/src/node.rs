@@ -258,13 +258,17 @@ impl NodeManager {
     /// Detect local machine capabilities.
     ///
     /// Queries the system for CPU count, available memory, and GPU availability.
+    /// On K8s, `ENCODER_GPU` / `ENCODER_CPU_FEATURE` (set from node labels via
+    /// the downward API) override autodetection so the container honors the
+    /// scheduler's decision rather than probing its own sandboxed view.
     pub fn detect_capabilities() -> NodeCapabilities {
         let cpu_cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
 
         let available_memory_mb = detect_memory_mb();
-        let (has_gpu, gpu_encoder) = detect_gpu();
+        let (has_gpu, gpu_encoder) = detect_encoder_from_env()
+            .unwrap_or_else(detect_gpu);
         let hostname = detect_hostname();
         let os = std::env::consts::OS.to_string();
 
@@ -327,6 +331,40 @@ fn detect_memory_mb() -> u64 {
 
     // Fallback
     8192
+}
+
+/// Resolve encoder from K8s-injected env vars.
+///
+/// Returns `None` when no env hints are set, falling back to autodetection.
+/// This is how the K8s overlay steers pods to the right encoder: Node Feature
+/// Discovery + GPU operators label nodes, the StatefulSet pins pods to those
+/// labels, and the downward API projects the winning label into the pod.
+///
+/// - `ENCODER_GPU=nvidia` → NVENC (NVIDIA Lovelace+ gets AV1, else HEVC)
+/// - `ENCODER_GPU=vaapi`  → VAAPI (Intel/AMD iGPU)
+/// - `ENCODER_GPU=none` + `ENCODER_CPU_FEATURE=avx512` → SVT-AV1 (AMD Zen 4+
+///   and Intel SPR+ get the strongest AVX-512 SIMD speedup here)
+/// - anything else → fall through to platform autodetection
+fn detect_encoder_from_env() -> Option<(bool, Option<String>)> {
+    let gpu = std::env::var("ENCODER_GPU").ok();
+    let cpu_feat = std::env::var("ENCODER_CPU_FEATURE").ok();
+
+    if gpu.is_none() && cpu_feat.is_none() {
+        return None;
+    }
+
+    match gpu.as_deref() {
+        Some("nvidia") => Some((true, Some("hevc_nvenc".to_string()))),
+        Some("vaapi") => Some((true, Some("hevc_vaapi".to_string()))),
+        Some("none") | Some("") | None => match cpu_feat.as_deref() {
+            Some("avx512") => Some((false, Some("libsvtav1".to_string()))),
+            _ => Some((false, Some("libx264".to_string()))),
+        },
+        Some(other) => {
+            tracing::warn!(value = %other, "Unknown ENCODER_GPU value; falling back to autodetect");
+            None
+        }
+    }
 }
 
 /// Detect GPU encoder availability.

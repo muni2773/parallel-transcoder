@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: transcoder-config
+  labels:
+    app.kubernetes.io/name: transcoder-node
+data:
+  # Name of the headless service — referenced from the StatefulSet command
+  # substitution to build the pod-0 join address.
+  service-name: "transcoder"
+
+  # Default object-store bucket for segment data. Overlays may override.
+  object-store-bucket: "transcoder-segments"
+
+  # Cluster log level.
+  log-level: "info"

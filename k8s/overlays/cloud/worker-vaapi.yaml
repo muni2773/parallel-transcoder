@@ -1,0 +1,76 @@
+# VAAPI worker pool — Intel / AMD iGPU via /dev/dri. Needs the Intel Device
+# Plugin Operator (or equivalent) to surface `gpu.intel.com/i915` as an
+# extended resource on labeled nodes. For raw /dev/dri access without a
+# plugin, swap the resource for a hostPath volume + privileged: true.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transcoder-worker-vaapi
+  labels:
+    app.kubernetes.io/name: transcoder-node
+    pool: gpu-vaapi
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: transcoder-node
+      pool: gpu-vaapi
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: transcoder-node
+        pool: gpu-vaapi
+    spec:
+      serviceAccountName: transcoder-node
+      terminationGracePeriodSeconds: 30
+      # FFmpeg needs r/w on /dev/dri/renderD128 — the render group GID
+      # varies per distro (often 44 or 104); adjust to match host.
+      securityContext:
+        supplementalGroups: [44, 104, 107]
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload-class
+                    operator: In
+                    values: ["gpu-vaapi"]
+      containers:
+        - name: transcoder-node
+          image: transcoder-node:dev
+          command:
+            - /usr/bin/tini
+            - --
+            - /usr/local/bin/transcoder-node
+            - --listen
+            - 0.0.0.0:9900
+            - --k8s-mode
+            - --join
+            - transcoder-node-0.transcoder.transcoder.svc.cluster.local:9900
+            - --worker-binary
+            - /usr/local/bin/transcoder-worker
+            - --lib-dir
+            - /usr/local/lib
+          env:
+            - name: ENCODER_GPU
+              value: "vaapi"
+            - name: POD_ORDINAL
+              value: "100"
+            - name: OBJECT_STORE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: transcoder-config
+                  key: object-store-url
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+              gpu.intel.com/i915: "1"
+            limits:
+              cpu: "8"
+              memory: "16Gi"
+              gpu.intel.com/i915: "1"
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "kill -TERM 1; sleep 2"]

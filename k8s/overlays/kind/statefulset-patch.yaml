@@ -1,0 +1,44 @@
+# Dev overlay: point pods at in-cluster MinIO, shrink resource asks so a
+# three-pod cluster fits on a single-node kind host, and force CPU-only
+# encoder selection since kind can't expose GPUs.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: transcoder-node
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: transcoder-node
+          env:
+            - name: OBJECT_STORE_URL
+              value: "http://minio.transcoder.svc.cluster.local:9000"
+            - name: OBJECT_STORE_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: transcoder-config
+                  key: object-store-bucket
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: MINIO_ROOT_USER
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: MINIO_ROOT_PASSWORD
+            # No GPU, no AVX-512 on kind — pods fall back to libx264. Real
+            # AVX-512 selection happens in the cloud overlay via NFD labels.
+            - name: ENCODER_GPU
+              value: "none"
+            - name: ENCODER_CPU_FEATURE
+              value: "baseline"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"

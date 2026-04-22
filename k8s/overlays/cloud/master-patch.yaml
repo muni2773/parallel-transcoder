@@ -1,0 +1,43 @@
+# Cloud: master runs alone on a generic (non-GPU, non-AVX-512) node pool.
+# Workers come from separate Deployments (see workers-*.yaml) so each
+# hardware class gets its own pod spec and nodeAffinity.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: transcoder-node
+spec:
+  replicas: 1
+  template:
+    spec:
+      # Pin the master off the GPU/AVX-512 nodes — keep those for workers.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload-class
+                    operator: In
+                    values: ["control"]
+      tolerations:
+        - key: control-plane-workload
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: transcoder-node
+          env:
+            - name: OBJECT_STORE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: transcoder-config
+                  key: object-store-url
+            - name: OBJECT_STORE_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: transcoder-config
+                  key: object-store-bucket
+            # Master doesn't encode — encoder choice here is irrelevant but
+            # we set it for the banner. Workers carry their own.
+            - name: ENCODER_GPU
+              value: "none"
+            - name: ENCODER_CPU_FEATURE
+              value: "baseline"

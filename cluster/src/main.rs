@@ -74,6 +74,23 @@ struct Cli {
     /// Enable verbose (debug-level) logging.
     #[arg(short, long)]
     verbose: bool,
+
+    /// Kubernetes mode: pod-0 is deterministic master (no bully election).
+    ///
+    /// Reads `POD_ORDINAL` from env (set via StatefulSet downward API). Ordinal
+    /// 0 bootstraps as master; all others treat pod-0 as the leader from the
+    /// start. K8s handles restart and failover, so bully election would just
+    /// fight the control loop. Pairs with `--join <headless-svc>-0.<svc>:9900`
+    /// on non-zero ordinals.
+    #[arg(long)]
+    k8s_mode: bool,
+
+    /// Object-storage endpoint (e.g. `http://minio.default.svc:9000`).
+    ///
+    /// When set, segment data flows through the bucket instead of SRT. The
+    /// SRT data plane is still used on desktop / LAN clusters.
+    #[arg(long)]
+    object_store_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1074,6 +1091,21 @@ async fn main() -> Result<()> {
 
     // --- Cluster bootstrap or join ---
 
+    // In k8s-mode, pod ordinal decides the role. Ordinal 0 is always master;
+    // every other pod joins and treats pod-0 as the leader without running a
+    // bully election (K8s handles the restart/failover loop).
+    let pod_ordinal: Option<usize> = if cli.k8s_mode {
+        match std::env::var("POD_ORDINAL").ok().and_then(|v| v.parse().ok()) {
+            Some(o) => Some(o),
+            None => {
+                warn!("--k8s-mode set but POD_ORDINAL env is missing; treating as ordinal 0");
+                Some(0)
+            }
+        }
+    } else {
+        None
+    };
+
     if let Some(ref join_addr) = cli.join {
         info!(addr = %join_addr, "Joining existing cluster");
         app.transport
@@ -1094,9 +1126,23 @@ async fn main() -> Result<()> {
             let _ = app.transport.send_to(&join_sock, msg);
         }
 
-        // Start an election to discover or contest the current master.
-        let start_msg = app.election.start_election();
-        app.transport.broadcast(&start_msg, None);
+        // k8s-mode: no bully election. Pod-0 is authoritative; others wait
+        // for the master identity to arrive via the Identified handshake.
+        if pod_ordinal.is_none() {
+            let start_msg = app.election.start_election();
+            app.transport.broadcast(&start_msg, None);
+        } else {
+            info!("k8s-mode: skipping bully election; trusting pod-0 as master");
+        }
+    } else if pod_ordinal == Some(0) {
+        info!("k8s-mode: pod-0 bootstrapping as deterministic master");
+        app.election.force_leader();
+    } else if pod_ordinal.is_some() {
+        // Shouldn't happen — non-zero ordinals are expected to have --join set
+        // in the StatefulSet command.
+        anyhow::bail!(
+            "k8s-mode on non-zero pod ordinal requires --join <service>-0.<service>:9900"
+        );
     } else {
         // Single-node bootstrap — we are the master.
         info!("Bootstrapping as single-node cluster master");
@@ -1120,6 +1166,25 @@ async fn main() -> Result<()> {
     schedule_tick.tick().await;
 
     info!("Entering main event loop");
+
+    // K8s sends SIGTERM on pod stop; install a handler so the pre-stop hook
+    // can trigger a clean NodeLeave. On non-unix, shim with a never-ready
+    // future so the select! branch compiles identically.
+    let sigterm_future = async {
+        #[cfg(unix)]
+        {
+            let mut sigterm = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::terminate(),
+            )
+            .expect("Failed to install SIGTERM handler");
+            sigterm.recv().await;
+        }
+        #[cfg(not(unix))]
+        {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::pin!(sigterm_future);
 
     loop {
         tokio::select! {
@@ -1151,8 +1216,17 @@ async fn main() -> Result<()> {
 
             // Graceful shutdown on Ctrl+C.
             _ = signal::ctrl_c() => {
-                info!("Received shutdown signal");
+                info!("Received SIGINT");
                 eprintln!("\n  Shutting down gracefully...");
+                app.send_leave();
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                info!("Goodbye.");
+                break;
+            }
+
+            // Graceful shutdown on SIGTERM (K8s pre-stop / pod eviction).
+            _ = &mut sigterm_future => {
+                info!("Received SIGTERM");
                 app.send_leave();
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 info!("Goodbye.");
