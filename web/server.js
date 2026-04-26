@@ -255,6 +255,9 @@ app.post("/api/transcode", async (req, res) => {
     percent: 0,
     errorMessage: null,
     createdAt: new Date(),
+    startedAt: new Date(),
+    segmentsCompleted: 0,
+    segmentsTotal: 0,
   };
   jobs.set(jobId, job);
 
@@ -550,6 +553,10 @@ wss.on("connection", (ws) => {
             phase: job.phase,
             percent: job.percent,
             message: `Subscribed — current phase: ${job.phase}`,
+            startedAt: job.startedAt,
+            now: Date.now(),
+            segmentsCompleted: job.segmentsCompleted,
+            segmentsTotal: job.segmentsTotal,
           });
           // Send recent logs
           for (const line of job.logs) {
@@ -596,6 +603,20 @@ function parsePhase(jobId, line) {
 
   const lower = line.toLowerCase();
 
+  const createdMatch = line.match(/Created\s+(\d+)\s+segments/i);
+  if (createdMatch) {
+    const total = parseInt(createdMatch[1], 10);
+    if (total > 0) job.segmentsTotal = total;
+  }
+
+  const doneMatch = line.match(/Segment\s+\d+\s+done\b/i);
+  if (doneMatch) {
+    job.segmentsCompleted = (job.segmentsCompleted || 0) + 1;
+    if (job.segmentsTotal && job.segmentsCompleted > job.segmentsTotal) {
+      job.segmentsCompleted = job.segmentsTotal;
+    }
+  }
+
   if (lower.includes("analyzing video") || lower.includes("analyzing")) {
     job.phase = "analyzing";
     job.percent = 10;
@@ -628,6 +649,10 @@ function parsePhase(jobId, line) {
       if (total > 0) {
         job.percent = 40 + Math.round((done / total) * 45); // 40-85%
       }
+    } else if (job.segmentsTotal > 0) {
+      const ratio = Math.min(1, job.segmentsCompleted / job.segmentsTotal);
+      const computed = 40 + Math.round(ratio * 45);
+      if (computed > job.percent) job.percent = computed;
     } else if (job.percent < 40) {
       job.percent = 40;
     }
@@ -645,6 +670,10 @@ function parsePhase(jobId, line) {
     phase: job.phase,
     percent: job.percent,
     message: line.trim(),
+    startedAt: job.startedAt,
+    now: Date.now(),
+    segmentsCompleted: job.segmentsCompleted,
+    segmentsTotal: job.segmentsTotal,
   });
 }
 
@@ -677,6 +706,9 @@ function jobSummary(job) {
     config: job.config,
     errorMessage: job.errorMessage,
     createdAt: job.createdAt,
+    startedAt: job.startedAt,
+    segmentsCompleted: job.segmentsCompleted || 0,
+    segmentsTotal: job.segmentsTotal || 0,
     logCount: job.logs.length,
   };
 }

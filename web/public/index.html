@@ -1213,6 +1213,39 @@ body::before {
   background: var(--error);
 }
 
+.vu-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.3px;
+  color: var(--text-secondary);
+}
+
+.vu-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.vu-stat-label {
+  text-transform: uppercase;
+  opacity: 0.7;
+  letter-spacing: 0.5px;
+}
+
+.vu-stat-value {
+  color: var(--amber);
+  font-weight: 600;
+}
+
+.vu-stat-value.muted {
+  color: var(--amber-dim);
+  font-weight: 500;
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    SEGMENT STATUS STRIP
    ═══════════════════════════════════════════════════════════════════ */
@@ -1851,6 +1884,18 @@ body::before {
     return m + ':' + String(s).padStart(5, '0');
   }
 
+  function formatMMSS(seconds) {
+    if (!isFinite(seconds) || seconds < 0) return '--:--';
+    var total = Math.round(seconds);
+    var h = Math.floor(total / 3600);
+    var m = Math.floor((total % 3600) / 60);
+    var s = total % 60;
+    var mm = String(m).padStart(2, '0');
+    var ss = String(s).padStart(2, '0');
+    if (h > 0) return h + ':' + mm + ':' + ss;
+    return mm + ':' + ss;
+  }
+
   function truncId(id) {
     return typeof id === 'string' ? id.substring(0, 8) : String(id);
   }
@@ -2015,6 +2060,12 @@ body::before {
           job.phase = msg.phase || job.phase;
           job.percent = typeof msg.percent === 'number' ? msg.percent : job.percent;
           job.message = msg.message || '';
+          if (msg.startedAt) {
+            var ts = typeof msg.startedAt === 'number' ? msg.startedAt : Date.parse(msg.startedAt);
+            if (!isNaN(ts)) job.startedAt = ts;
+          }
+          if (typeof msg.segmentsCompleted === 'number') job.segmentsCompleted = msg.segmentsCompleted;
+          if (typeof msg.segmentsTotal === 'number') job.segmentsTotal = msg.segmentsTotal;
           UI.updateJob(msg.jobId);
           break;
         case 'log':
@@ -2029,6 +2080,7 @@ body::before {
         case 'complete':
           job.phase = 'complete';
           job.percent = 100;
+          job.finishedAt = Date.now();
           job.outputFiles = msg.outputFiles || [];
           WS.subs.delete(msg.jobId);
           UI.updateJob(msg.jobId);
@@ -2042,6 +2094,7 @@ body::before {
         case 'error':
           job.phase = 'error';
           job.errorMessage = msg.message || 'Unknown error';
+          job.finishedAt = Date.now();
           WS.subs.delete(msg.jobId);
           UI.updateJob(msg.jobId);
           break;
@@ -2292,6 +2345,12 @@ body::before {
             '</div>' +
             '<div class="vu-meter" data-role="vu-meter">' + UI._buildVU() + '</div>' +
             '<div class="simple-bar" data-role="simple-bar"><div class="simple-bar-fill" data-role="simple-bar-fill"></div></div>' +
+            '<div class="vu-stats" data-role="vu-stats">' +
+              '<span class="vu-stat"><span class="vu-stat-label">Elapsed</span><span class="vu-stat-value" data-role="elapsed-text">--:--</span></span>' +
+              '<span class="vu-stat"><span class="vu-stat-label">ETA</span><span class="vu-stat-value muted" data-role="eta-text">--:--</span></span>' +
+              '<span class="vu-stat"><span class="vu-stat-label">Remaining</span><span class="vu-stat-value muted" data-role="remaining-text">100%</span></span>' +
+              '<span class="vu-stat" data-role="segments-stat" style="display:none"><span class="vu-stat-label">Segments</span><span class="vu-stat-value" data-role="segments-text">0 / 0</span></span>' +
+            '</div>' +
           '</div>' +
           '<div class="segment-strip" data-role="segment-strip"></div>' +
           '<div class="log-tail" data-role="log-tail"></div>' +
@@ -2375,6 +2434,8 @@ body::before {
       simpleBarFill.classList.toggle('complete', phase === 'complete');
       simpleBarFill.classList.toggle('error', phase === 'error');
 
+      UI.updateJobStats(jobId);
+
       // Card accent
       card.className = 'job-card' + (phase === 'complete' ? ' phase-complete' : '') + (phase === 'error' ? ' phase-error' : '');
 
@@ -2394,6 +2455,63 @@ body::before {
         dlLinks.innerHTML = lh;
         dlLinks.style.display = lh ? 'flex' : 'none';
       }
+    },
+
+    updateJobStats: function(jobId) {
+      var card = document.getElementById('job-' + jobId);
+      if (!card) return;
+      var job = App.jobs.get(jobId);
+      if (!job) return;
+
+      var elapsedEl = card.querySelector('[data-role="elapsed-text"]');
+      var etaEl = card.querySelector('[data-role="eta-text"]');
+      var remainingEl = card.querySelector('[data-role="remaining-text"]');
+      var segmentsStat = card.querySelector('[data-role="segments-stat"]');
+      var segmentsText = card.querySelector('[data-role="segments-text"]');
+      if (!elapsedEl || !etaEl || !remainingEl) return;
+
+      var pct = job.percent || 0;
+      var phase = job.phase || 'pending';
+      var terminal = (phase === 'complete' || phase === 'error' || phase === 'cancelled');
+
+      var endMs = terminal && job.finishedAt ? job.finishedAt : Date.now();
+      var elapsedSec = job.startedAt ? Math.max(0, (endMs - job.startedAt) / 1000) : 0;
+      elapsedEl.textContent = job.startedAt ? formatMMSS(elapsedSec) : '--:--';
+
+      if (terminal) {
+        etaEl.textContent = phase === 'complete' ? '00:00' : '--:--';
+        etaEl.classList.toggle('muted', phase !== 'complete');
+      } else if (pct > 0 && pct < 100 && job.startedAt) {
+        var etaSec = elapsedSec * (100 - pct) / pct;
+        etaEl.textContent = formatMMSS(etaSec);
+        etaEl.classList.remove('muted');
+      } else {
+        etaEl.textContent = '--:--';
+        etaEl.classList.add('muted');
+      }
+
+      var remaining = Math.max(0, 100 - pct);
+      remainingEl.textContent = Math.round(remaining) + '%';
+      remainingEl.classList.toggle('muted', remaining === 0);
+
+      if (segmentsStat && segmentsText) {
+        var total = job.segmentsTotal || 0;
+        if (total > 0) {
+          var done = Math.min(total, job.segmentsCompleted || 0);
+          segmentsText.textContent = done + ' / ' + total;
+          segmentsStat.style.display = '';
+        } else {
+          segmentsStat.style.display = 'none';
+        }
+      }
+    },
+
+    tickStats: function() {
+      App.jobs.forEach(function(job, jobId) {
+        var phase = job.phase || 'pending';
+        if (phase === 'complete' || phase === 'error' || phase === 'cancelled') return;
+        UI.updateJobStats(jobId);
+      });
     },
 
     addLog: function(jobId, line) {
@@ -2644,6 +2762,7 @@ body::before {
       WS.connect();
       Cluster.init();
       App.loadJobs();
+      setInterval(function() { UI.tickStats(); }, 1000);
     },
 
     loadJobs: function() {
@@ -2653,12 +2772,23 @@ body::before {
         list.forEach(function(j) {
           var id = j.jobId || j.id;
           if (!id) return;
+          var startedAtMs = null;
+          if (j.startedAt) {
+            var t = typeof j.startedAt === 'number' ? j.startedAt : Date.parse(j.startedAt);
+            if (!isNaN(t)) startedAtMs = t;
+          } else if (j.createdAt) {
+            var t2 = typeof j.createdAt === 'number' ? j.createdAt : Date.parse(j.createdAt);
+            if (!isNaN(t2)) startedAtMs = t2;
+          }
           App.jobs.set(id, {
             phase: j.phase || j.status || 'pending',
             percent: j.percent || 0,
             message: j.message || '',
             logs: [],
             segments: j.segments || 0,
+            segmentsCompleted: j.segmentsCompleted || 0,
+            segmentsTotal: j.segmentsTotal || 0,
+            startedAt: startedAtMs,
             outputFiles: j.outputFiles || []
           });
           UI.createJobCard(id);
@@ -2773,7 +2903,8 @@ body::before {
           phase: useCluster ? 'starting' : 'pending',
           percent: 0,
           message: useCluster ? ('Submitted to cluster ' + (data.master || Cluster.master)) : '',
-          logs: [], segments: 0, outputFiles: [], cluster: useCluster
+          logs: [], segments: 0, segmentsCompleted: 0, segmentsTotal: 0,
+          startedAt: Date.now(), outputFiles: [], cluster: useCluster
         });
         UI.createJobCard(jobId);
         if (!useCluster) WS.subscribe(jobId);

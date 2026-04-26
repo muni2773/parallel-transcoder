@@ -279,7 +279,7 @@ async fn main() -> Result<()> {
         let split_pb = ProgressBar::new(segments.len() as u64);
         split_pb.set_style(
             ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} segments ({eta} remaining)")
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {percent:>3}% • {pos}/{len} segments • ETA {eta_precise}")
                 .unwrap()
                 .progress_chars("##-"),
         );
@@ -517,7 +517,7 @@ async fn main() -> Result<()> {
         let overall_pb = multi_progress.add(ProgressBar::new(encode_count as u64));
         overall_pb.set_style(
             ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} segments ({eta} remaining)")
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {percent:>3}% • {pos}/{len} segments • ETA {eta_precise}")
                 .unwrap()
                 .progress_chars("##-"),
         );
@@ -543,6 +543,7 @@ async fn main() -> Result<()> {
                 let preset = args.preset.clone();
                 let encoder = args.encoder.clone();
                 let pb = overall_pb.clone();
+                let mp = multi_progress.clone();
                 let presplit_path = presplit_paths
                     .as_ref()
                     .map(|paths| paths[seg_idx].clone());
@@ -559,6 +560,7 @@ async fn main() -> Result<()> {
                         verbose,
                         presplit_path.as_deref(),
                         use_hw_decode,
+                        &mp,
                     )
                     .await;
                     pb.inc(1);
@@ -672,7 +674,10 @@ async fn spawn_worker(
     verbose: bool,
     presplit_path: Option<&Path>,
     hw_decode: bool,
+    multi_progress: &MultiProgress,
 ) -> Result<WorkerResult> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
     let segment_file = output_dir.join(format!("segment_{:04}.ts", desc.id));
     let segment_json =
         serde_json::to_string(desc).context("Failed to serialize segment descriptor")?;
@@ -712,26 +717,76 @@ async fn spawn_worker(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let output = cmd
-        .output()
-        .await
+    let total_frames = desc.end_frame.saturating_sub(desc.start_frame) + 1;
+    let seg_pb = multi_progress.add(ProgressBar::new(total_frames));
+    seg_pb.set_style(
+        ProgressStyle::default_bar()
+            .template("  [Worker {prefix}] {bar:30.green/black} {percent:>3}% • {pos}/{len} frames • ETA {eta_precise}")
+            .unwrap()
+            .progress_chars("##-"),
+    );
+    seg_pb.set_prefix(worker_id.to_string());
+
+    let mut child = cmd
+        .spawn()
         .with_context(|| format!("Failed to spawn worker for segment {}", desc.id))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout_handle = child.stdout.take();
+    let stderr_handle = child.stderr.take();
+
+    let seg_pb_stderr = seg_pb.clone();
+    let stderr_task = tokio::spawn(async move {
+        let mut captured = String::new();
+        if let Some(stderr) = stderr_handle {
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                if let Some(rest) = line.split("Encoded ").nth(1) {
+                    if let Some(n_str) = rest.split_whitespace().next() {
+                        if let Ok(n) = n_str.parse::<u64>() {
+                            seg_pb_stderr.set_position(n.min(total_frames));
+                        }
+                    }
+                }
+                captured.push_str(&line);
+                captured.push('\n');
+            }
+        }
+        captured
+    });
+
+    let stdout_task = tokio::spawn(async move {
+        let mut captured = String::new();
+        if let Some(stdout) = stdout_handle {
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                captured.push_str(&line);
+                captured.push('\n');
+            }
+        }
+        captured
+    });
+
+    let status = child
+        .wait()
+        .await
+        .with_context(|| format!("Failed to wait for worker for segment {}", desc.id))?;
+
+    let stderr_output = stderr_task.await.unwrap_or_default();
+    let stdout_output = stdout_task.await.unwrap_or_default();
+
+    seg_pb.finish_and_clear();
+
+    if !status.success() {
         anyhow::bail!(
             "Worker for segment {} exited with {}: {}",
             desc.id,
-            output.status,
-            stderr.lines().last().unwrap_or("(no output)")
+            status,
+            stderr_output.lines().last().unwrap_or("(no output)")
         );
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .context("Worker stdout is not valid UTF-8")?;
-
     // The worker prints the JSON result as the last line of stdout
-    let json_line = stdout
+    let json_line = stdout_output
         .lines()
         .rev()
         .find(|line| line.trim_start().starts_with('{'))
