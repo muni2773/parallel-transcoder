@@ -9,13 +9,57 @@
 #   docker buildx build --platform linux/amd64,linux/arm64 -t transcoder-node:dev .
 
 # ---------------------------------------------------------------------------
-# Stage 1: builder — FFmpeg 8.1 dev headers + rustc
+# Stage 1a: ffmpeg-build — compile FFmpeg 8.1 from source for the target arch.
+#
+# We can't reuse jrottenberg/ffmpeg's prebuilt libs because that image only
+# ships linux/amd64. Building from source is ~5–8 min uncached but layer-
+# caches cleanly and runs natively on whatever platform docker is targeting.
 # ---------------------------------------------------------------------------
-FROM jrottenberg/ffmpeg:8.1-ubuntu2404 AS ffmpeg-src
+FROM ubuntu:24.04 AS ffmpeg-build
 
+ARG FFMPEG_VERSION=8.1
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      autoconf \
+      automake \
+      build-essential \
+      ca-certificates \
+      cmake \
+      curl \
+      git \
+      libtool \
+      nasm \
+      pkg-config \
+      yasm \
+      zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+RUN curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
+      | tar -xJ \
+    && cd "ffmpeg-${FFMPEG_VERSION}" \
+    && ./configure \
+         --prefix=/usr/local \
+         --enable-shared \
+         --disable-static \
+         --disable-doc \
+         --disable-htmlpages \
+         --disable-manpages \
+         --disable-podpages \
+         --disable-txtpages \
+         --enable-gpl \
+         --enable-version3 \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd / && rm -rf /build
+
+# ---------------------------------------------------------------------------
+# Stage 1b: builder — FFmpeg 8.1 dev headers + rustc
+# ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS builder
 
-ARG RUST_VERSION=1.82.0
+ARG RUST_VERSION=1.95.0
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -27,13 +71,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy FFmpeg 8.1 from the upstream image rather than building it ourselves.
-COPY --from=ffmpeg-src /usr/local/lib /usr/local/lib
-COPY --from=ffmpeg-src /usr/local/include /usr/local/include
-COPY --from=ffmpeg-src /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
-COPY --from=ffmpeg-src /usr/local/bin/ffprobe /usr/local/bin/ffprobe
+# Pull the FFmpeg artifacts we just built — same layout the upstream image
+# uses (libs in /usr/local/lib, headers in /usr/local/include, binaries in
+# /usr/local/bin).
+COPY --from=ffmpeg-build /usr/local/lib /usr/local/lib
+COPY --from=ffmpeg-build /usr/local/include /usr/local/include
+COPY --from=ffmpeg-build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg-build /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 
-# The jrottenberg image lays FFmpeg's .pc files under /usr/local/lib/pkgconfig.
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 ENV LD_LIBRARY_PATH=/usr/local/lib
 
@@ -69,15 +114,23 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 # ---------------------------------------------------------------------------
 # Stage 2: runtime — FFmpeg 8.1 shared libs + transcoder-node daemon
 # ---------------------------------------------------------------------------
-FROM jrottenberg/ffmpeg:8.1-ubuntu2404 AS runtime
+FROM ubuntu:24.04 AS runtime
 
-# jrottenberg sets ENTRYPOINT=/usr/local/bin/ffmpeg — override for our daemon.
-ENTRYPOINT []
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       tini \
+      libxcb1 \
+      libxext6 \
+      libxv1 \
     && rm -rf /var/lib/apt/lists/*
+
+# FFmpeg shared libs + binaries from the build stage.
+COPY --from=ffmpeg-build /usr/local/lib /usr/local/lib
+COPY --from=ffmpeg-build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg-build /usr/local/bin/ffprobe /usr/local/bin/ffprobe
+RUN ldconfig
 
 # Make the FFmpeg shared libs discoverable at runtime.
 ENV LD_LIBRARY_PATH=/usr/local/lib

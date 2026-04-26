@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpListener;
+use tokio::net::{lookup_host, TcpListener};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 use tracing::{error, info, warn};
@@ -105,17 +105,27 @@ impl Transport {
         Ok(())
     }
 
-    /// Connect to a peer node.
+    /// Connect to a peer node. `addr` may be `host:port` (DNS-resolved) or
+    /// `ip:port`. The returned PeerHandle.addr is the resolved SocketAddr,
+    /// which callers should use as the routing key for `send_to`.
     pub async fn connect(&self, addr: &str) -> Result<PeerHandle> {
+        // Resolve hostname → SocketAddr so the peer-map key is valid even when
+        // addr is a K8s service DNS name like `transcoder-node-0.<svc>.<ns>...`.
+        let socket_addr: SocketAddr = match addr.parse() {
+            Ok(sa) => sa,
+            Err(_) => lookup_host(addr)
+                .await
+                .with_context(|| format!("DNS lookup failed for {}", addr))?
+                .next()
+                .with_context(|| format!("No addresses resolved for {}", addr))?,
+        };
+
         let url = format!("ws://{}", addr);
         let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
             .await
             .with_context(|| format!("Failed to connect to {}", addr))?;
 
-        info!("Connected to peer at {}", addr);
-        let socket_addr: SocketAddr = addr
-            .parse()
-            .with_context(|| format!("Invalid address: {}", addr))?;
+        info!("Connected to peer at {} ({})", addr, socket_addr);
 
         let (tx, rx) = mpsc::unbounded_channel::<Message>();
 

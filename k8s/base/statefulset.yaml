@@ -41,12 +41,13 @@ spec:
             - |
               set -eu
               ORDINAL="${POD_NAME##*-}"
+              POD_PREFIX="${POD_NAME%-*}"
               export POD_ORDINAL="$ORDINAL"
               ARGS="--listen 0.0.0.0:9900 --k8s-mode \
                 --worker-binary /usr/local/bin/transcoder-worker \
                 --lib-dir /usr/local/lib"
               if [ "$ORDINAL" != "0" ]; then
-                ARGS="$ARGS --join ${SERVICE_NAME}-0.${SERVICE_NAME}.${POD_NAMESPACE}.svc.cluster.local:9900"
+                ARGS="$ARGS --join ${POD_PREFIX}-0.${SERVICE_NAME}.${POD_NAMESPACE}.svc.cluster.local:9900"
               fi
               if [ -n "${OBJECT_STORE_URL:-}" ]; then
                 ARGS="$ARGS --object-store-url $OBJECT_STORE_URL"

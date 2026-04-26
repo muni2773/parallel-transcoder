@@ -9,6 +9,11 @@ metadata:
     app.kubernetes.io/name: transcoder-node
 spec:
   clusterIP: None
+  # Pre-publish DNS records before pods pass readiness so pod-N can resolve
+  # pod-0's DNS at boot time even while pod-0 is still warming up. Without
+  # this, parallel pod startup races readiness propagation and worker pods
+  # crash on first DNS lookup.
+  publishNotReadyAddresses: true
   selector:
     app.kubernetes.io/name: transcoder-node
   ports:

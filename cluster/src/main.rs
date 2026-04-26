@@ -1193,15 +1193,30 @@ async fn main() -> Result<()> {
 
     if let Some(ref join_addr) = cli.join {
         info!(addr = %join_addr, "Joining existing cluster");
-        app.transport
-            .connect(join_addr)
-            .await
-            .with_context(|| format!("Failed to connect to {}", join_addr))?;
+        // Retry the join — under K8s, pod-N can boot before pod-0's DNS A
+        // record is published, and the master pod itself may take a few
+        // seconds to begin accepting WebSocket connections.
+        let peer_handle = {
+            let mut last_err: Option<anyhow::Error> = None;
+            let mut handle = None;
+            for attempt in 1..=30 {
+                match app.transport.connect(join_addr).await {
+                    Ok(h) => { handle = Some(h); break; }
+                    Err(e) => {
+                        warn!(addr = %join_addr, attempt, error = %e, "join attempt failed; retrying in 2s");
+                        last_err = Some(e);
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                }
+            }
+            handle.ok_or_else(|| {
+                last_err.unwrap_or_else(|| anyhow::anyhow!("join exhausted retries"))
+            }).with_context(|| format!("Failed to connect to {}", join_addr))?
+        };
 
-        // Send Hello to initiate the handshake.
-        let join_sock: SocketAddr = join_addr
-            .parse()
-            .context("Invalid --join address")?;
+        // Use the resolved SocketAddr from the peer handle so DNS-based
+        // join addresses (K8s service DNS) route correctly through send_to.
+        let join_sock: SocketAddr = peer_handle.addr;
         let hello = HelloData {
             cluster_name: CLUSTER_NAME.into(),
             protocol_version: PROTOCOL_VERSION,
