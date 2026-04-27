@@ -13,7 +13,8 @@
     "desktop:build": "electron-builder",
     "desktop:build:mac": "electron-builder --mac",
     "desktop:build:linux": "electron-builder --linux",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test 'desktop/test/**/*.test.js'",
+    "test:rust": "cargo test --workspace"
   },
   "keywords": [
     "video",
@@ -47,6 +48,7 @@
     },
     "files": [
       "desktop/**/*",
+      "!desktop/test/**/*",
       "web/server.js",
       "web/public/**/*",
       "package.json",
@@ -59,7 +61,10 @@
     ],
     "extraResources": [
       { "from": "bin", "to": "bin", "filter": ["**/*"] },
-      { "from": "lib", "to": "lib", "filter": ["**/*"] }
+      { "from": "lib", "to": "lib", "filter": ["**/*"] },
+      { "from": "k8s", "to": "k8s", "filter": ["**/*"] },
+      { "from": "Dockerfile", "to": "Dockerfile" },
+      { "from": "build.sh", "to": "build.sh" }
     ],
     "asar": true,
     "mac": {

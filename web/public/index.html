@@ -1416,6 +1416,147 @@ body::before {
 /* ═══════════════════════════════════════════════════════════════════
    CLUSTER PANEL
    ═══════════════════════════════════════════════════════════════════ */
+/* Cluster mode selector */
+.cluster-mode-bar {
+  display: flex;
+  gap: 0;
+  margin-bottom: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2px;
+}
+.cluster-mode-btn {
+  flex: 1;
+  padding: 7px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius) - 2px);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: all 0.15s var(--ease);
+}
+.cluster-mode-btn:hover { color: var(--text); }
+.cluster-mode-btn.active {
+  background: var(--surface-overlay);
+  border-color: var(--border);
+  color: var(--amber);
+}
+
+.cluster-status-block {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.cluster-master-line {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.cluster-master-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.cluster-master-line code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.cluster-pane {
+  /* No outer chrome — the mode bar is enough framing */
+}
+.cluster-pane-help {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin-bottom: 10px;
+}
+.cluster-pane .field-label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.cluster-pane .cluster-input {
+  width: 100%;
+  padding: 7px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  outline: none;
+  margin-bottom: 8px;
+}
+.cluster-pane .cluster-input:focus { border-color: var(--amber-dim); }
+
+.cluster-action-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.cluster-action-row button {
+  flex: 1;
+  padding: 8px;
+  background: var(--surface-overlay);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s var(--ease);
+}
+.cluster-action-row .btn-start { color: var(--success); border-color: rgba(64, 196, 99, 0.3); }
+.cluster-action-row .btn-start:hover:not(:disabled) { background: var(--success-dim); }
+.cluster-action-row .btn-stop { color: var(--error); border-color: rgba(229, 83, 75, 0.3); }
+.cluster-action-row .btn-stop:hover:not(:disabled) { background: var(--error-dim); }
+.cluster-action-row button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.cluster-pane-row {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-dim);
+}
+.cluster-pane-row-input {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.cluster-pane-row-input input[type="number"] {
+  flex: 1;
+  padding: 7px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  outline: none;
+}
+.cluster-pane-row-input input[type="number"]:focus { border-color: var(--amber-dim); }
+.cluster-pane-row-input button { padding: 7px 12px; }
+
 .cluster-row {
   display: flex;
   gap: 8px;
@@ -1469,73 +1610,66 @@ body::before {
 }
 .cluster-check input { accent-color: var(--amber); }
 
-.local-node-box {
-  margin-top: 12px;
-  padding: 12px;
-  background: var(--surface-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-.local-node-box .field-label {
-  display: block;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  margin-bottom: 4px;
-}
-.local-node-box input[type="text"] {
-  width: 100%;
-  padding: 7px 10px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
+/* K8s panel */
+.k8s-status {
   font-family: var(--font-mono);
   font-size: 11px;
-  outline: none;
+  color: var(--text-secondary);
   margin-bottom: 8px;
 }
-.local-node-box input[type="text"]:focus { border-color: var(--amber-dim); }
-
-.local-node-actions {
+.k8s-tools {
   display: flex;
-  gap: 8px;
-  margin-top: 4px;
-}
-.local-node-actions button {
-  flex: 1;
-  padding: 8px;
-  background: var(--surface-overlay);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  font-family: var(--font-body);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s var(--ease);
-}
-.local-node-actions .btn-start { color: var(--success); border-color: rgba(64, 196, 99, 0.3); }
-.local-node-actions .btn-start:hover:not(:disabled) { background: var(--success-dim); }
-.local-node-actions .btn-stop { color: var(--error); border-color: rgba(229, 83, 75, 0.3); }
-.local-node-actions .btn-stop:hover:not(:disabled) { background: var(--error-dim); }
-.local-node-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
-
-.local-node-status {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border-dim);
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
   font-family: var(--font-mono);
   font-size: 10px;
+}
+.k8s-tool-pill {
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
   color: var(--text-muted);
   letter-spacing: 0.5px;
 }
+.k8s-tool-pill.ok { color: var(--success); border-color: rgba(64, 196, 99, 0.4); }
+.k8s-tool-pill.miss { color: var(--error); border-color: rgba(229, 83, 75, 0.4); }
+
+/* K8s right-panel pods table */
+.k8s-pod-action {
+  background: transparent;
+  border: 1px solid rgba(229, 83, 75, 0.4);
+  color: var(--error);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.2s var(--ease);
+}
+.k8s-pod-action:hover:not(:disabled) { background: var(--error-dim); }
+.k8s-pod-action:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.k8s-log {
+  margin-top: 12px;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.k8s-log:empty { display: none; }
+.k8s-log .ll-event { color: var(--amber-dim); }
+.k8s-log .ll-stderr { color: var(--text-secondary); }
+.k8s-log .ll-stdout { color: var(--text); }
 
 /* Cluster status card (right panel) */
 .cluster-card {
@@ -1544,9 +1678,7 @@ body::before {
   border-radius: var(--radius-lg);
   overflow: hidden;
   position: relative;
-  display: none;
 }
-.cluster-card.visible { display: block; }
 .cluster-card::before, .cluster-card::after {
   content: '';
   position: absolute;
@@ -1789,37 +1921,86 @@ body::before {
       <div class="panel-section">
         <div class="section-label">Cluster</div>
 
-        <div class="cluster-row">
-          <input type="text" id="clusterMaster" placeholder="host:port" spellcheck="false">
-          <button class="url-import-btn" id="clusterConnectBtn" type="button">Connect</button>
+        <div class="cluster-mode-bar" role="radiogroup" aria-label="Cluster mode">
+          <button class="cluster-mode-btn active" data-mode="off" type="button">Off</button>
+          <button class="cluster-mode-btn" data-mode="local" type="button">Local</button>
+          <button class="cluster-mode-btn" data-mode="remote" type="button">Remote</button>
+          <button class="cluster-mode-btn" data-mode="k8s" id="modeBtnK8s" type="button" style="display:none">K8s</button>
         </div>
 
-        <div class="cluster-status-line">
-          <span class="cluster-dot" id="clusterDot"></span>
-          <span id="clusterStatusText">Not connected</span>
+        <div class="cluster-status-block" id="clusterStatusBlock" style="display:none">
+          <div class="cluster-master-line">
+            <span class="cluster-master-label">Master</span>
+            <code id="clusterMasterDisplay">—</code>
+          </div>
+          <div class="cluster-status-line">
+            <span class="cluster-dot" id="clusterDot"></span>
+            <span id="clusterStatusText">Not connected</span>
+          </div>
         </div>
 
-        <label class="cluster-check">
-          <input type="checkbox" id="clusterUse">
-          <span>Submit transcode to cluster</span>
-        </label>
+        <!-- Off pane -->
+        <div class="cluster-pane" data-pane="off">
+          <div class="cluster-pane-help">Transcoding runs on this machine. Pick a mode above to fan work out to a cluster.</div>
+        </div>
 
-        <div class="local-node-box" id="localNodeBox" style="display:none">
+        <!-- Local pane (desktop-only) -->
+        <div class="cluster-pane" data-pane="local" style="display:none">
+          <div class="cluster-pane-help">Spawn a transcoder-node daemon on this machine. Pick "Join" to attach it to an existing master, or leave blank to bootstrap a single-node cluster here.</div>
           <label class="field-label" for="nodeListen">Listen</label>
-          <input type="text" id="nodeListen" value="0.0.0.0:9900" spellcheck="false">
-          <label class="field-label" for="nodeJoin">Join (optional)</label>
-          <input type="text" id="nodeJoin" placeholder="host:9900 — leave blank to bootstrap" spellcheck="false">
+          <input type="text" id="nodeListen" class="cluster-input" value="0.0.0.0:9900" spellcheck="false">
+          <label class="field-label" for="nodeJoin">Join existing master (optional)</label>
+          <input type="text" id="nodeJoin" class="cluster-input" placeholder="host:9900 — leave blank to bootstrap" spellcheck="false">
           <label class="field-label" for="nodeName">Node name</label>
-          <input type="text" id="nodeName" placeholder="auto" spellcheck="false">
-
-          <div class="local-node-actions">
+          <input type="text" id="nodeName" class="cluster-input" placeholder="auto" spellcheck="false">
+          <div class="cluster-action-row">
             <button class="btn-start" id="btnNodeStart" type="button">Start Node</button>
             <button class="btn-stop" id="btnNodeStop" type="button" disabled>Stop</button>
           </div>
+        </div>
 
-          <div class="local-node-status">
-            <span class="cluster-dot" id="nodeDot"></span>
-            <span id="nodeStatusText">Stopped</span>
+        <!-- Remote pane -->
+        <div class="cluster-pane" data-pane="remote" style="display:none">
+          <div class="cluster-pane-help">Connect this UI to a transcoder-node master that's already running somewhere else.</div>
+          <label class="field-label" for="clusterMaster">Master address</label>
+          <div class="cluster-row">
+            <input type="text" id="clusterMaster" placeholder="host:port" spellcheck="false">
+            <button class="url-import-btn" id="clusterConnectBtn" type="button">Connect</button>
+          </div>
+        </div>
+
+        <!-- Kubernetes pane (desktop-only) -->
+        <div class="cluster-pane" data-pane="k8s" style="display:none">
+          <div class="cluster-pane-help">Provision a local kind cluster, scale pods, and port-forward the master to this machine.</div>
+
+          <div class="k8s-tools" id="k8sTools"></div>
+          <div class="k8s-status" id="k8sStatusText">Checking…</div>
+
+          <div class="cluster-action-row">
+            <button class="btn-start" id="btnK8sCreate" type="button">Create Cluster</button>
+            <button class="btn-stop" id="btnK8sDelete" type="button" disabled>Delete Cluster</button>
+          </div>
+
+          <label class="cluster-check" style="padding-top:6px">
+            <input type="checkbox" id="k8sSkipBuild">
+            <span>Skip image build (reuse existing <code>transcoder-node:dev</code>)</span>
+          </label>
+
+          <div class="cluster-pane-row">
+            <label class="field-label" for="k8sReplicas">Replicas</label>
+            <div class="cluster-pane-row-input">
+              <input type="number" id="k8sReplicas" min="1" max="50" step="1" value="3">
+              <button class="url-import-btn" id="btnK8sScale" type="button" disabled>Scale</button>
+            </div>
+          </div>
+
+          <div class="cluster-pane-row">
+            <label class="field-label" for="k8sPfPort">Port-forward to localhost</label>
+            <div class="cluster-pane-row-input">
+              <input type="number" id="k8sPfPort" min="1024" max="65535" step="1" value="9900">
+              <button class="url-import-btn" id="btnK8sPfStart" type="button" disabled>Start</button>
+              <button class="url-import-btn" id="btnK8sPfStop" type="button" disabled>Stop</button>
+            </div>
           </div>
         </div>
       </div>
@@ -1831,7 +2012,7 @@ body::before {
 
       <div class="analysis-view" id="analysisView"></div>
 
-      <section class="cluster-card" id="clusterCard">
+      <section class="cluster-card" id="clusterCard" style="display:none">
         <div class="cluster-card-header">
           <h2>Cluster</h2>
           <div class="cluster-card-meta">
@@ -1842,6 +2023,20 @@ body::before {
         <div class="nodes-table-wrap" id="nodesTableWrap">
           <div class="cluster-empty" id="clusterEmpty">No nodes reported.</div>
         </div>
+      </section>
+
+      <section class="cluster-card" id="k8sCard" style="display:none">
+        <div class="cluster-card-header">
+          <h2>Kubernetes Pods</h2>
+          <div class="cluster-card-meta">
+            <span class="cluster-dot" id="k8sCardDot"></span>
+            <span id="k8sCardMeta">—</span>
+          </div>
+        </div>
+        <div class="nodes-table-wrap" id="k8sPodsWrap">
+          <div class="cluster-empty">No cluster.</div>
+        </div>
+        <div class="k8s-log" id="k8sLog"></div>
       </section>
 
       <div class="jobs-section" id="jobsSection">
@@ -2566,124 +2761,227 @@ body::before {
    * ================================================================== */
 
   /* ==================================================================
-   * Cluster
+   * Cluster (single controller, mode-driven)
+   *
+   * mode: 'off' | 'local' | 'remote' | 'k8s'
+   * master: host:port string, set by whichever mode is active
+   * connected: true once /api/cluster/status returns OK
+   * useCluster (derived): mode !== 'off' && master is set
    * ================================================================== */
 
   var Cluster = {
-    master: null,
-    useCluster: false,
+    mode: 'off',
+    master: '',
+    connected: false,
     pollTimer: null,
     els: {},
-    lastStatus: null,
+
+    // K8s sub-state (only meaningful in mode === 'k8s')
+    k8s: {
+      busy: null,
+      portForwardActive: false,
+      pollTimer: null,
+    },
+
+    get useCluster() { return Cluster.mode !== 'off' && !!Cluster.master; },
 
     init: function() {
       var ids = [
-        'clusterMaster', 'clusterConnectBtn', 'clusterDot', 'clusterStatusText',
-        'clusterUse', 'localNodeBox', 'nodeListen', 'nodeJoin', 'nodeName',
-        'btnNodeStart', 'btnNodeStop', 'nodeDot', 'nodeStatusText',
-        'clusterCard', 'clusterCardDot', 'clusterCardMeta', 'nodesTableWrap', 'clusterEmpty'
+        // mode bar
+        'modeBtnK8s',
+        // shared status
+        'clusterStatusBlock', 'clusterMasterDisplay', 'clusterDot', 'clusterStatusText',
+        // local pane
+        'nodeListen', 'nodeJoin', 'nodeName', 'btnNodeStart', 'btnNodeStop',
+        // remote pane
+        'clusterMaster', 'clusterConnectBtn',
+        // k8s pane
+        'k8sTools', 'k8sStatusText', 'btnK8sCreate', 'btnK8sDelete', 'k8sSkipBuild',
+        'k8sReplicas', 'btnK8sScale', 'k8sPfPort', 'btnK8sPfStart', 'btnK8sPfStop',
+        // right-panel cards
+        'clusterCard', 'clusterCardDot', 'clusterCardMeta', 'nodesTableWrap',
+        'k8sCard', 'k8sCardDot', 'k8sCardMeta', 'k8sPodsWrap', 'k8sLog'
       ];
       ids.forEach(function(id) { Cluster.els[id] = document.getElementById(id); });
 
+      var hasDesktopCluster = !!(window.desktop && window.desktop.cluster);
+      var hasDesktopK8s     = !!(window.desktop && window.desktop.k8s);
+
+      // Restore state
+      var savedMode = 'off';
+      var savedMaster = '';
       try {
-        Cluster.master = localStorage.getItem('cluster.master') || '';
-        Cluster.useCluster = localStorage.getItem('cluster.use') === '1';
+        savedMode = localStorage.getItem('cluster.mode') || 'off';
+        savedMaster = localStorage.getItem('cluster.master') || '';
       } catch (e) {}
 
-      if (Cluster.master) Cluster.els.clusterMaster.value = Cluster.master;
-      Cluster.els.clusterUse.checked = Cluster.useCluster;
+      // Mode bar wiring
+      var modeBtns = document.querySelectorAll('.cluster-mode-btn');
+      Array.prototype.forEach.call(modeBtns, function(btn) {
+        var m = btn.getAttribute('data-mode');
+        // Hide modes that need desktop integration when running in browser
+        if (m === 'local' && !hasDesktopCluster) { btn.style.display = 'none'; return; }
+        if (m === 'k8s'   && !hasDesktopK8s)     { btn.style.display = 'none'; return; }
+        btn.addEventListener('click', function() { Cluster.setMode(m); });
+      });
 
-      Cluster.els.clusterConnectBtn.addEventListener('click', Cluster.connect);
+      // Remote pane
+      Cluster.els.clusterConnectBtn.addEventListener('click', Cluster.connectRemote);
       Cluster.els.clusterMaster.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') Cluster.connect();
+        if (e.key === 'Enter') Cluster.connectRemote();
       });
-      Cluster.els.clusterUse.addEventListener('change', function() {
-        Cluster.useCluster = this.checked;
-        try { localStorage.setItem('cluster.use', Cluster.useCluster ? '1' : '0'); } catch (e) {}
-      });
+      if (savedMaster) Cluster.els.clusterMaster.value = savedMaster;
 
-      // Desktop-only local node controls
-      if (window.desktop && window.desktop.cluster) {
-        Cluster.els.localNodeBox.style.display = '';
+      // Local pane (desktop-only)
+      if (hasDesktopCluster) {
         Cluster.els.btnNodeStart.addEventListener('click', Cluster.startLocalNode);
         Cluster.els.btnNodeStop.addEventListener('click', Cluster.stopLocalNode);
-
-        window.desktop.cluster.onState(Cluster.renderLocalNode);
+        window.desktop.cluster.onState(Cluster.renderLocalNodeButtons);
         window.desktop.cluster.getNodeState().then(function(r) {
-          if (r && r.ok) Cluster.renderLocalNode(r.state);
+          if (r && r.ok) Cluster.renderLocalNodeButtons(r.state);
         });
       }
 
-      if (Cluster.master) Cluster.connect();
+      // K8s pane (desktop-only)
+      if (hasDesktopK8s) {
+        Cluster.els.btnK8sCreate.addEventListener('click', Cluster.onK8sCreate);
+        Cluster.els.btnK8sDelete.addEventListener('click', Cluster.onK8sDelete);
+        Cluster.els.btnK8sScale.addEventListener('click', Cluster.onK8sScale);
+        Cluster.els.btnK8sPfStart.addEventListener('click', Cluster.onK8sPfStart);
+        Cluster.els.btnK8sPfStop.addEventListener('click', Cluster.onK8sPfStop);
+        window.desktop.k8s.onLog(Cluster.appendK8sLog);
+        window.desktop.k8s.onBusy(function(p) {
+          Cluster.k8s.busy = p && p.busy;
+          Cluster.applyK8sBusyUI();
+        });
+        window.desktop.k8s.getLogs(200).then(function(r) {
+          if (r && r.ok) {
+            (r.logs || []).forEach(Cluster.appendK8sLog);
+            Cluster.k8s.busy = r.busy || null;
+            Cluster.applyK8sBusyUI();
+          }
+        });
+      }
+
+      // Restore mode (fall back to 'off' if the saved mode requires desktop and we're in browser)
+      if (savedMode === 'local' && !hasDesktopCluster) savedMode = 'off';
+      if (savedMode === 'k8s'   && !hasDesktopK8s)     savedMode = 'off';
+      Cluster.master = savedMaster;
+      Cluster.setMode(savedMode);
+
+      // If we have a previously-saved master and a non-off mode, try to connect.
+      if (Cluster.master && Cluster.mode !== 'off') {
+        Cluster.connectToMaster(Cluster.master);
+      }
     },
 
-    connect: function() {
-      var m = (Cluster.els.clusterMaster.value || '').trim();
-      if (!m) {
-        Cluster.setStatus(false, 'No master set');
-        return;
+    // ----------------------- mode + connection ------------------------
+
+    setMode: function(mode) {
+      if (!['off', 'local', 'remote', 'k8s'].includes(mode)) mode = 'off';
+      Cluster.mode = mode;
+      try { localStorage.setItem('cluster.mode', mode); } catch (e) {}
+
+      // Update mode bar visuals
+      var btns = document.querySelectorAll('.cluster-mode-btn');
+      Array.prototype.forEach.call(btns, function(btn) {
+        btn.classList.toggle('active', btn.getAttribute('data-mode') === mode);
+      });
+
+      // Show only the matching pane
+      var panes = document.querySelectorAll('.cluster-pane');
+      Array.prototype.forEach.call(panes, function(p) {
+        p.style.display = p.getAttribute('data-pane') === mode ? '' : 'none';
+      });
+
+      // Status block + right cards visibility
+      var off = (mode === 'off');
+      Cluster.els.clusterStatusBlock.style.display = off ? 'none' : '';
+      Cluster.els.clusterCard.style.display = off ? 'none' : '';
+      Cluster.els.k8sCard.style.display = (mode === 'k8s') ? '' : 'none';
+
+      if (off) {
+        Cluster.stopPolling();
+        Cluster.connected = false;
+        Cluster.renderNodes(null, true);
+      } else if (Cluster.mode === 'k8s') {
+        Cluster.startK8sPolling();
+      } else {
+        Cluster.stopK8sPolling();
       }
-      if (!/^[A-Za-z0-9_.\-]+:\d+$/.test(m)) {
+    },
+
+    /** Set the master address and start polling /api/cluster/status. */
+    connectToMaster: function(addr) {
+      var m = (addr || '').trim();
+      if (!m || !/^[A-Za-z0-9_.\-]+:\d+$/.test(m)) {
         Cluster.setStatus(false, 'Invalid host:port');
-        return;
+        return false;
       }
       Cluster.master = m;
       try { localStorage.setItem('cluster.master', m); } catch (e) {}
-      Cluster.setStatus(null, 'Checking...');
-      Cluster.refresh();
+      Cluster.els.clusterMasterDisplay.textContent = m;
+      Cluster.setStatus(null, 'Checking\u2026');
+      Cluster.refreshNodes();
 
       if (Cluster.pollTimer) clearInterval(Cluster.pollTimer);
-      Cluster.pollTimer = setInterval(Cluster.refresh, 5000);
+      Cluster.pollTimer = setInterval(Cluster.refreshNodes, 5000);
+      return true;
     },
 
-    refresh: function() {
-      if (!Cluster.master) return;
+    /** "Connect" button in Remote mode. */
+    connectRemote: function() {
+      Cluster.connectToMaster(Cluster.els.clusterMaster.value);
+    },
+
+    stopPolling: function() {
+      if (Cluster.pollTimer) { clearInterval(Cluster.pollTimer); Cluster.pollTimer = null; }
+    },
+
+    refreshNodes: function() {
+      if (!Cluster.master || Cluster.mode === 'off') return;
       API.clusterStatus(Cluster.master).then(function(data) {
         if (data && data.error) {
+          Cluster.connected = false;
           Cluster.setStatus(false, data.error);
-          Cluster.renderNodes(null);
+          Cluster.renderNodes(null, false);
           return;
         }
-        Cluster.lastStatus = data;
+        Cluster.connected = true;
         var nodes = data.nodes || [];
         var leader = data.leader_id || data.leader || null;
         Cluster.setStatus(true, nodes.length + ' node' + (nodes.length === 1 ? '' : 's'));
-        Cluster.renderNodes(data);
+        Cluster.renderNodes(data, false);
         Cluster.els.clusterCardMeta.textContent =
           Cluster.master + ' \u2022 ' + nodes.length + ' node' + (nodes.length === 1 ? '' : 's') +
           (leader ? ' \u2022 leader ' + String(leader).substring(0, 8) : '');
         Cluster.els.clusterCardDot.className = 'cluster-dot online';
-      }).catch(function(err) {
+      }).catch(function() {
+        Cluster.connected = false;
         Cluster.setStatus(false, 'Unreachable');
-        Cluster.renderNodes(null);
+        Cluster.renderNodes(null, false);
       });
     },
 
     setStatus: function(on, label) {
-      var dot = Cluster.els.clusterDot;
-      dot.className = 'cluster-dot' + (on === true ? ' online' : on === false ? ' offline' : '');
+      Cluster.els.clusterDot.className = 'cluster-dot' + (on === true ? ' online' : on === false ? ' offline' : '');
       Cluster.els.clusterStatusText.textContent = label;
+      Cluster.els.clusterMasterDisplay.textContent = Cluster.master || '\u2014';
     },
 
-    renderNodes: function(data) {
-      var card = Cluster.els.clusterCard;
+    renderNodes: function(data, hidden) {
       var wrap = Cluster.els.nodesTableWrap;
-      var empty = Cluster.els.clusterEmpty;
-
+      if (hidden) { wrap.innerHTML = ''; return; }
       if (!data) {
-        card.classList.add('visible');
         wrap.innerHTML = '<div class="cluster-empty">Cluster unreachable.</div>';
         Cluster.els.clusterCardDot.className = 'cluster-dot offline';
         return;
       }
-
-      card.classList.add('visible');
       var nodes = data.nodes || [];
       if (nodes.length === 0) {
         wrap.innerHTML = '<div class="cluster-empty">No nodes reported.</div>';
         return;
       }
-
       var leader = data.leader_id || data.leader || null;
       var h = '<table class="nodes-table">';
       h += '<thead><tr><th>Name</th><th>ID</th><th>Role</th><th>Address</th><th>State</th><th>Encoders</th></tr></thead><tbody>';
@@ -2710,11 +3008,13 @@ body::before {
       wrap.innerHTML = h;
     },
 
+    // ----------------------- Local node (desktop) ----------------------
+
     startLocalNode: function() {
       var opts = {
         listen: (Cluster.els.nodeListen.value || '0.0.0.0:9900').trim(),
-        join: (Cluster.els.nodeJoin.value || '').trim() || null,
-        name: (Cluster.els.nodeName.value || '').trim() || undefined,
+        join:   (Cluster.els.nodeJoin.value   || '').trim() || null,
+        name:   (Cluster.els.nodeName.value   || '').trim() || undefined,
       };
       Cluster.els.btnNodeStart.disabled = true;
       window.desktop.cluster.startNode(opts).then(function(r) {
@@ -2723,13 +3023,9 @@ body::before {
           alert('Failed to start node: ' + (r && r.error ? r.error : 'unknown'));
           return;
         }
-        // Auto-fill master field to local address if not set
-        if (!Cluster.els.clusterMaster.value) {
-          var listen = r.state.listen || '';
-          var hostPort = listen.replace(/^0\.0\.0\.0:/, '127.0.0.1:');
-          Cluster.els.clusterMaster.value = hostPort;
-          setTimeout(Cluster.connect, 500);
-        }
+        var listen = (r.state && r.state.listen) || '';
+        var addr = listen.replace(/^0\.0\.0\.0:/, '127.0.0.1:');
+        if (addr) setTimeout(function() { Cluster.connectToMaster(addr); }, 500);
       });
     },
 
@@ -2738,17 +3034,189 @@ body::before {
       window.desktop.cluster.stopNode();
     },
 
-    renderLocalNode: function(state) {
+    /** Reflect daemon running/stopped in the Local pane buttons. */
+    renderLocalNodeButtons: function(state) {
       var running = !!(state && state.running);
       Cluster.els.btnNodeStart.disabled = running;
       Cluster.els.btnNodeStop.disabled = !running;
-      Cluster.els.nodeDot.className = 'cluster-dot' + (running ? ' online' : ' offline');
-      if (running) {
-        var label = state.listen + (state.joinedMaster ? '  \u2192  ' + state.joinedMaster : '  (bootstrap)');
-        Cluster.els.nodeStatusText.textContent = label;
-      } else {
-        Cluster.els.nodeStatusText.textContent = 'Stopped';
+    },
+
+    // ----------------------- Kubernetes (desktop) ----------------------
+
+    startK8sPolling: function() {
+      Cluster.refreshK8s();
+      if (Cluster.k8s.pollTimer) clearInterval(Cluster.k8s.pollTimer);
+      Cluster.k8s.pollTimer = setInterval(Cluster.refreshK8s, 5000);
+    },
+
+    stopK8sPolling: function() {
+      if (Cluster.k8s.pollTimer) { clearInterval(Cluster.k8s.pollTimer); Cluster.k8s.pollTimer = null; }
+    },
+
+    refreshK8s: function() {
+      if (!(window.desktop && window.desktop.k8s)) return;
+      window.desktop.k8s.getStatus().then(function(r) {
+        if (!r || !r.ok) {
+          Cluster.setK8sStatus(false, (r && r.error) || 'k8s status unavailable');
+          Cluster.renderK8sTools(null);
+          Cluster.renderPods(null, null);
+          return;
+        }
+        Cluster.k8s.busy = r.busy || null;
+        Cluster.renderK8sTools(r.tools);
+        Cluster.applyK8sBusyUI();
+        if (!r.tools || !r.tools.kind || !r.tools.kubectl || !r.tools.docker) {
+          Cluster.setK8sStatus(false, 'Missing required tools');
+          Cluster.renderPods(null, null);
+          return;
+        }
+        if (!r.clusterExists) {
+          Cluster.setK8sStatus(null, 'No kind cluster (transcoder)');
+          Cluster.renderPods([], 'No cluster.');
+          return;
+        }
+        var ready = (r.pods || []).filter(function(p) { return p.ready; }).length;
+        var total = (r.pods || []).length;
+        var label = 'kind/transcoder \u2022 ' + ready + '/' + total + ' ready';
+        if (r.replicas != null) label += ' \u2022 desired ' + r.replicas;
+        Cluster.setK8sStatus(true, label);
+        if (r.replicas != null && document.activeElement !== Cluster.els.k8sReplicas) {
+          Cluster.els.k8sReplicas.value = r.replicas;
+        }
+        Cluster.renderPods(r.pods, r.podsError);
+      }).catch(function(err) {
+        Cluster.setK8sStatus(false, 'k8s error: ' + (err && err.message));
+      });
+    },
+
+    setK8sStatus: function(on, label) {
+      var cls = 'cluster-dot' + (on === true ? ' online' : on === false ? ' offline' : '');
+      Cluster.els.k8sStatusText.textContent = label;
+      Cluster.els.k8sCardDot.className = cls;
+      Cluster.els.k8sCardMeta.textContent = label;
+    },
+
+    renderK8sTools: function(tools) {
+      var wrap = Cluster.els.k8sTools;
+      if (!tools) { wrap.innerHTML = ''; return; }
+      var pills = ['kubectl', 'kind', 'docker'].map(function(name) {
+        var present = !!tools[name];
+        var cls = present ? 'ok' : 'miss';
+        var glyph = present ? '\u2713' : '\u2717';
+        return '<span class="k8s-tool-pill ' + cls + '">' + glyph + ' ' + name + '</span>';
+      });
+      wrap.innerHTML = pills.join('');
+    },
+
+    applyK8sBusyUI: function() {
+      var busy = !!Cluster.k8s.busy;
+      Cluster.els.btnK8sCreate.disabled = busy;
+      Cluster.els.btnK8sDelete.disabled = busy;
+      Cluster.els.btnK8sScale.disabled  = busy;
+      Cluster.els.btnK8sPfStart.disabled = busy ||  Cluster.k8s.portForwardActive;
+      Cluster.els.btnK8sPfStop.disabled  = busy || !Cluster.k8s.portForwardActive;
+      if (busy) Cluster.setK8sStatus(null, Cluster.k8s.busy + '\u2026');
+    },
+
+    renderPods: function(pods, errorOrEmpty) {
+      var wrap = Cluster.els.k8sPodsWrap;
+      if (pods == null) {
+        wrap.innerHTML = '<div class="cluster-empty">' + esc(String(errorOrEmpty || 'unavailable')) + '</div>';
+        return;
       }
+      if (pods.length === 0) {
+        wrap.innerHTML = '<div class="cluster-empty">' + esc(String(errorOrEmpty || 'No pods.')) + '</div>';
+        return;
+      }
+      var h = '<table class="nodes-table">';
+      h += '<thead><tr><th>Name</th><th>Role</th><th>Phase</th><th>Ready</th><th>Restarts</th><th>Node</th><th></th></tr></thead><tbody>';
+      pods.forEach(function(p) {
+        h += '<tr>';
+        h += '<td>' + esc(String(p.name || '')) + '</td>';
+        h += '<td><span class="node-role ' + (p.role === 'master' ? 'master' : 'worker') + '">' + esc(p.role || '') + '</span></td>';
+        h += '<td>' + esc(String(p.phase || '')) + '</td>';
+        h += '<td>' + (p.ready ? '\u2713' : '\u2717') + '</td>';
+        h += '<td>' + esc(String(p.restarts || 0)) + '</td>';
+        h += '<td>' + esc(String(p.node || '')) + '</td>';
+        h += '<td><button class="k8s-pod-action" data-pod="' + esc(p.name || '') + '">Delete</button></td>';
+        h += '</tr>';
+      });
+      h += '</tbody></table>';
+      wrap.innerHTML = h;
+      Array.prototype.forEach.call(wrap.querySelectorAll('.k8s-pod-action'), function(btn) {
+        btn.addEventListener('click', function() {
+          var name = btn.getAttribute('data-pod');
+          if (!name) return;
+          if (!confirm('Delete pod ' + name + '? StatefulSet will recreate it.')) return;
+          btn.disabled = true;
+          window.desktop.k8s.deletePod(name).then(function(r) {
+            if (!r || !r.ok) alert('Delete failed: ' + ((r && r.error) || 'unknown'));
+            Cluster.refreshK8s();
+          });
+        });
+      });
+    },
+
+    appendK8sLog: function(entry) {
+      if (!entry) return;
+      var box = Cluster.els.k8sLog;
+      if (!box) return;
+      var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+      var div = document.createElement('div');
+      div.className = 'll-' + (entry.stream || 'event');
+      div.textContent = entry.line;
+      box.appendChild(div);
+      while (box.children.length > 400) box.removeChild(box.firstChild);
+      if (atBottom) box.scrollTop = box.scrollHeight;
+    },
+
+    onK8sCreate: function() {
+      var skip = !!Cluster.els.k8sSkipBuild.checked;
+      var msg = skip
+        ? 'Create kind cluster "transcoder" and apply overlay (skipping image build)?'
+        : 'Create kind cluster "transcoder", build image, and apply overlay?\nThis can take several minutes.';
+      if (!confirm(msg)) return;
+      window.desktop.k8s.createCluster({ skipBuild: skip }).then(function(r) {
+        if (!r || !r.ok) alert('Create failed: ' + ((r && r.error) || 'unknown'));
+        Cluster.refreshK8s();
+      });
+    },
+
+    onK8sDelete: function() {
+      if (!confirm('Delete kind cluster "transcoder"? All pods and data will be lost.')) return;
+      window.desktop.k8s.deleteCluster().then(function(r) {
+        if (!r || !r.ok) alert('Delete failed: ' + ((r && r.error) || 'unknown'));
+        Cluster.refreshK8s();
+      });
+    },
+
+    onK8sScale: function() {
+      var n = parseInt(Cluster.els.k8sReplicas.value, 10);
+      if (!Number.isFinite(n) || n < 1) { alert('Replicas must be a positive integer'); return; }
+      window.desktop.k8s.scale(n).then(function(r) {
+        if (!r || !r.ok) alert('Scale failed: ' + ((r && r.error) || 'unknown'));
+        Cluster.refreshK8s();
+      });
+    },
+
+    onK8sPfStart: function() {
+      var port = parseInt(Cluster.els.k8sPfPort.value, 10) || 9900;
+      window.desktop.k8s.portForwardStart(port).then(function(r) {
+        if (!r || !r.ok) {
+          alert('Port-forward failed: ' + ((r && r.error) || 'unknown'));
+          return;
+        }
+        Cluster.k8s.portForwardActive = true;
+        Cluster.applyK8sBusyUI();
+        Cluster.connectToMaster('127.0.0.1:' + port);
+      });
+    },
+
+    onK8sPfStop: function() {
+      window.desktop.k8s.portForwardStop().then(function() {
+        Cluster.k8s.portForwardActive = false;
+        Cluster.applyK8sBusyUI();
+      });
     }
   };
 
@@ -2908,7 +3376,7 @@ body::before {
         });
         UI.createJobCard(jobId);
         if (!useCluster) WS.subscribe(jobId);
-        else Cluster.refresh();
+        else Cluster.refreshNodes();
       }).catch(function(err) {
         UI.setBtnLoading(UI.els.btnTranscode, false);
         console.error('Transcode error:', err);

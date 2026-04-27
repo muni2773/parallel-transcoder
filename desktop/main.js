@@ -1,7 +1,8 @@
 const { app, BrowserWindow, shell, dialog, ipcMain } = require('electron');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const path = require('path');
 const os = require('os');
+const { createK8sManager } = require('./k8s');
 
 const READY_TIMEOUT_MS = 15000;
 const SHUTDOWN_GRACE_MS = 3000;
@@ -23,6 +24,29 @@ let nodeState = {
   startedAt: null,
 };
 const nodeLogs = [];
+
+// K8s manager (lazily constructed once mainWindow exists for log/busy emit)
+let k8s = null;
+function getK8s() {
+  if (k8s) return k8s;
+  k8s = createK8sManager({
+    spawn,
+    execFile,
+    repoRoot: resolvePaths().resourcesDir,
+    platform: process.platform,
+    onLog: (entry) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('k8s:log', entry);
+      }
+    },
+    onBusy: (busy) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('k8s:busy', { busy });
+      }
+    },
+  });
+  return k8s;
+}
 
 function log(...args) {
   console.log('[desktop]', ...args);
@@ -280,6 +304,53 @@ async function shutdownServer() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// IPC handlers — k8s (delegates to desktop/k8s.js)
+// ---------------------------------------------------------------------------
+ipcMain.handle('k8s:check-tools', async () => {
+  try { return { ok: true, ...(await getK8s().checkTools()) }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('k8s:get-status', async () => {
+  try { return { ok: true, ...(await getK8s().getStatus()) }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('k8s:create-cluster', async (_event, opts) => {
+  try { return await getK8s().createCluster(opts || {}); }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('k8s:delete-cluster', async () => {
+  try { return await getK8s().deleteCluster(); }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('k8s:scale', async (_event, replicas) => {
+  try { return await getK8s().scale(replicas); }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('k8s:delete-pod', async (_event, name) => {
+  try { return await getK8s().deletePod(name); }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('k8s:port-forward-start', async (_event, localPort) => {
+  try { return await getK8s().startPortForward(localPort); }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('k8s:port-forward-stop', async () => {
+  try { await getK8s().stopPortForward(); return { ok: true }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('k8s:get-logs', async (_event, limit) => {
+  return { ok: true, ...getK8s().getLogs(limit) };
+});
+
 // IPC handlers for cluster node management
 ipcMain.handle('cluster:start-node', async (_event, opts) => {
   try {
@@ -344,6 +415,7 @@ if (!app.requestSingleInstanceLock()) {
     isQuitting = true;
     e.preventDefault();
     await stopNode().catch(() => {});
+    if (k8s) await k8s.stopPortForward().catch(() => {});
     await shutdownServer();
     app.exit(0);
   });
