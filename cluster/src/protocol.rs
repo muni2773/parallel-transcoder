@@ -4,13 +4,19 @@
 //! Wire format: `{ "op": number, "d": object }` serialized as JSON over WebSocket.
 
 use serde::{Deserialize, Serialize};
+use serde_repr::{Deserialize_repr, Serialize_repr};
 use uuid::Uuid;
 
 pub type NodeId = Uuid;
 pub type JobId = Uuid;
 
-/// OBS-websocket inspired OpCodes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// OBS-websocket inspired OpCodes.
+///
+/// Wire format: `op` is the numeric discriminant (e.g. `50` for `StatusRequest`),
+/// per the documented `{ "op": number, "d": object }` JSON shape. `serde_repr`
+/// is required because the default `Serialize` derive ignores `#[repr(u8)]` and
+/// would otherwise emit the variant *name* instead of the number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum OpCode {
     // Handshake
@@ -425,12 +431,30 @@ mod tests {
         assert!(value.get("op").is_some());
         assert!(value.get("d").is_some());
 
+        // `op` must serialize as the numeric discriminant — non-Rust clients
+        // (the JS web server) send and expect numbers per the documented
+        // wire format. If this regresses, JS↔Rust messages stop parsing.
+        assert_eq!(value.get("op").and_then(|v| v.as_u64()), Some(255));
+
         // Round-trip through JSON
         let msg2: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(msg2.op, OpCode::Error);
         let parsed: ErrorData = msg2.parse_data().unwrap();
         assert_eq!(parsed.code, 404);
         assert_eq!(parsed.message, "Node not found");
+    }
+
+    #[test]
+    fn test_opcode_numeric_wire_format() {
+        // Numeric on the wire (matches JS clients and protocol docs).
+        let json = serde_json::to_string(&OpCode::StatusRequest).unwrap();
+        assert_eq!(json, "50");
+        let json = serde_json::to_string(&OpCode::Heartbeat).unwrap();
+        assert_eq!(json, "20");
+
+        // Deserialize from numeric form (what the JS web server sends).
+        let m: Message = serde_json::from_str(r#"{"op":50,"d":{}}"#).unwrap();
+        assert_eq!(m.op, OpCode::StatusRequest);
     }
 
     #[test]
