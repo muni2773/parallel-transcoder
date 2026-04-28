@@ -347,11 +347,14 @@ mod tests {
         let id = Uuid::new_v4();
         let mut mgr = ElectionManager::new(
             id,
-            Duration::from_millis(0), // immediate timeout
+            Duration::from_millis(1),
             Duration::from_secs(5),
         );
         mgr.start_election();
 
+        // Sleep past election_timeout deterministically — `> Duration::ZERO`
+        // can race the monotonic clock when two Instant reads tie.
+        std::thread::sleep(Duration::from_millis(5));
         let result = mgr.check_timeout();
         assert!(result.is_some());
         let msg = result.unwrap();
@@ -421,8 +424,9 @@ mod tests {
     #[test]
     fn test_reset() {
         let id = Uuid::new_v4();
-        let mut mgr = ElectionManager::new(id, Duration::from_millis(0), Duration::from_secs(5));
+        let mut mgr = ElectionManager::new(id, Duration::from_millis(1), Duration::from_secs(5));
         mgr.start_election();
+        std::thread::sleep(Duration::from_millis(5));
         let _ = mgr.check_timeout(); // becomes leader
         assert!(mgr.is_leader());
 
@@ -438,7 +442,7 @@ mod tests {
         let mut mgr = ElectionManager::new(
             id,
             Duration::from_secs(5),
-            Duration::from_millis(0), // immediate victory timeout
+            Duration::from_millis(1),
         );
         mgr.start_election();
 
@@ -446,7 +450,9 @@ mod tests {
         let alive_data = ElectionAliveData { node_id: other };
         mgr.handle_alive(&alive_data);
 
-        // Victory timeout should restart election
+        // Sleep past victory_timeout deterministically — `> Duration::ZERO`
+        // can race the monotonic clock when two Instant reads tie.
+        std::thread::sleep(Duration::from_millis(5));
         let result = mgr.check_timeout();
         assert!(result.is_some());
         let msg = result.unwrap();
@@ -472,9 +478,9 @@ mod tests {
         let node_mid = Uuid::from_bytes(mid_bytes);
         let node_high = Uuid::from_bytes(high_bytes);
 
-        let mut mgr_low = ElectionManager::new(node_low, Duration::from_millis(0), Duration::from_secs(5));
-        let mut mgr_mid = ElectionManager::new(node_mid, Duration::from_millis(0), Duration::from_secs(5));
-        let mut mgr_high = ElectionManager::new(node_high, Duration::from_millis(0), Duration::from_secs(5));
+        let mut mgr_low = ElectionManager::new(node_low, Duration::from_millis(1), Duration::from_secs(5));
+        let mut mgr_mid = ElectionManager::new(node_mid, Duration::from_millis(1), Duration::from_secs(5));
+        let mut mgr_high = ElectionManager::new(node_high, Duration::from_millis(1), Duration::from_secs(5));
 
         // Low-priority node starts election
         let start_msg = mgr_low.start_election();
@@ -494,6 +500,7 @@ mod tests {
         assert!(!mgr_low.is_leader());
 
         // High-priority node times out (no one higher), declares victory
+        std::thread::sleep(Duration::from_millis(5));
         let victory = mgr_high.check_timeout();
         assert!(victory.is_some());
         let victory_msg = victory.unwrap();
